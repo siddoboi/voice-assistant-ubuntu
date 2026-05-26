@@ -275,5 +275,8 @@ Two-layer test architecture across all modules:
 | `speech_ratio` precision mismatch | `vad.py` stores `round(speech_chunks/total_chunks, 3)` - 3dp; test used full float precision | Widened tolerance to `abs=1e-3` |
 
 #### Test Results (WSL2, Python 3.13.5)
+- 95 passed, 0 skipped in 13.68s   (--run-integration)
+- 86 passed, 9 skipped in ~0.4s    (unit only)
+
 #### Carries to Day 3
 - `src/pipeline.py` — hardcoded 5s record → ASR → LLM → TTS → play
