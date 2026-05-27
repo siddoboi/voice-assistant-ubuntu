@@ -4,37 +4,42 @@
 # direct access to host microphones, so input_device is null by default
 # (record() will raise a clear error if called without an override).
 # Tests use pre-recorded .wav files and do not require a live device.
-#
-# When the Pi arrives, configs/pi_config.yaml will mirror this schema
-# with concrete device indices for the USB audio adapter.
-
 audio:
-  # Sample rate used for all in-pipeline audio (Hz). Telephony 8kHz audio
-  # is resampled to this rate via audio_io.resample_8_to_16k().
+  # Sample rate for all in-pipeline audio (Hz).
   sample_rate: 16000
-
-  # Telephony / SIP source sample rate (Hz). Used by resample_8_to_16k().
+  # Telephony source sample rate (Hz). Used by resample_8_to_16k().
   telephony_sample_rate: 8000
-
   # Single channel — all pipeline audio is mono.
   channels: 1
-
-  # 16-bit PCM. sounddevice float32 is used in-memory; .wav files are
-  # written as int16 to keep them compatible with faster-whisper and Piper.
+  # 16-bit PCM. sounddevice float32 used in-memory; .wav files written as int16.
   dtype: int16
-
-  # Input device. null = sounddevice default. On WSL2 this is typically
-  # unset; tests do not exercise live recording.
+  # Input device. null = sounddevice default.
   input_device: null
-
-  # Output device. null = sounddevice default. play() will fall back to
-  # the system default if this is null.
+  # Output device. null = sounddevice default.
   output_device: null
-
-  # Default recording duration in seconds when caller does not pass one.
-  # Used by the Day 3 hardcoded-5s pipeline.
+  # Default recording duration when caller does not pass one.
   default_record_duration_sec: 5.0
 
 paths:
-  # All recordings are written here; this directory is gitignored.
+  # All recordings written here; gitignored.
   recordings_dir: recordings
+
+# Conversation manager configuration (Week 3 Day 1).
+# Controls multi-turn history, system prompt, and SQLite session persistence.
+conversation:
+  # System prompt prepended to every LLM call. Kept terse to minimise tokens
+  # and keep responses short — critical for the 3s perceived-latency target.
+  # Real call utterances are 3-5s; the model must answer concisely.
+  system_prompt: >-
+    You are a helpful voice assistant answering a live phone call.
+    Keep replies short and conversational — one or two sentences.
+    Speak naturally as if on the phone. Do not use markdown, bullet points,
+    or code. If asked something you cannot answer, say so briefly.
+  # Rolling window: max number of (user, assistant) turn PAIRS retained
+  # in-memory and sent to the LLM. Older pairs are evicted but remain in
+  # SQLite for offline review. 6 pairs ≈ 12 messages ≈ comfortably within
+  # both Llama 3.2 1B (128K) and TinyLlama (2K) context windows.
+  max_history_turns: 6
+  # SQLite database file for session persistence. Schema is auto-created
+  # on first use. Parent directory must exist.
+  db_path: recordings/conversations.db

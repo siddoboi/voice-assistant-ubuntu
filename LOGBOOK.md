@@ -318,3 +318,70 @@ is 51s of dense speech - real utterances will be 3-5s. No system prompt yet.*
 #### Carries to Day 4
 - Pi-dependent: ALSA setup, `pi_config.yaml`, USB audio adapter, live mic test
 - Blocked until Pi 5 arrives
+
+---
+
+## WEEK 3 - Streaming & Multi-Turn Memory
+
+**Goal:** Sub-3s perceived latency end-to-end via LLM streaming → TTS streaming pipeline,
+plus multi-turn conversation memory with SQLite session persistence.
+
+**Status: 🔄 IN PROGRESS**
+**Pi 5 status: ⏳ Not yet arrived - Day 5 fallback task scheduled.**
+
+---
+
+### Day 1 - ConversationManager
+
+**Theme:** Multi-turn conversation memory with rolling history, system prompt, SQLite persistence.
+
+#### Done
+- `configs/dev_config.yaml` extended with new `conversation:` section:
+  - `system_prompt` - terse phone-call persona (one-to-two sentence replies, no markdown)
+  - `max_history_turns: 6` - max (user, assistant) pairs kept in memory; fits both Llama 3.2 1B (128K ctx) and TinyLlama (2K ctx)
+  - `db_path: recordings/conversations.db`
+- `src/conversation.py` written — `ConversationManager` class (production-quality: type hints, docstrings, config-driven):
+  - `__init__(config_path, session_id, system_prompt, max_history_turns, db_path)` - new session (UUID4) if `session_id=None`, else resume from SQLite
+  - `add_user_turn(text)` / `add_assistant_turn(text)` - append to in-memory history, persist to SQLite immediately, evict oldest pair if over window
+  - `build_messages()` → `list[{role, content}]` - system prompt first (omitted if empty), rolling window only, `timestamp` stripped (Ollama rejects extra keys)
+  - `get_history()` — shallow copy of rolling window; caller mutation cannot affect internal state
+  - `get_full_history()` — every turn for this session from SQLite (no window limit); used for post-call WER evaluation
+  - `end_session()` — idempotent; stamps `ended_at` on session row, closes DB connection
+  - Context manager (`__enter__` / `__exit__`) - `end_session()` called even on exception
+  - Config resolution mirrors `audio_io.py`: explicit arg → `VOICE_ASSISTANT_CONFIG` env → `configs/dev_config.yaml`; result cached, reloads only on path change
+- SQLite schema:
+  - `sessions(id TEXT PK, started_at REAL, ended_at REAL, system_prompt TEXT)`
+  - `turns(id INTEGER PK AUTOINCREMENT, session_id TEXT FK, role TEXT, content TEXT, timestamp REAL)`
+  - `idx_turns_session` index on `(session_id, id)` for fast per-session lookups
+  - WAL journal mode; `PRAGMA foreign_keys=ON`; schema auto-created on first use
+- `tests/test_conversation.py` written - 54 unit tests across 8 test classes:
+  - `TestConfigLoading` (8): resolution priority, missing file, invalid YAML, non-mapping root, cache hit/miss
+  - `TestInit` (13): UUID shape, config values loaded, all 5 overrides, db parent dir creation, validation errors (zero/negative/non-int window, non-string prompt), missing conversation section fallback
+  - `TestSchema` (3): tables created, session row inserted with correct fields, index present
+  - `TestAddTurn` (7): append to history, persist to DB, empty/whitespace/non-string rejected, monotonic timestamps
+  - `TestRollingWindow` (5): under/at/over/far-over capacity, SQLite unaffected by eviction
+  - `TestBuildMessages` (6): system prompt first, order preserved, only `{role, content}` keys, empty history, empty prompt omitted, prompt survives eviction
+  - `TestResume` (4): loads prior turns, stored prompt wins over override, window respected on resume, unknown session_id raises
+  - `TestEndSession` (4): `ended_at` stamped, idempotent, context manager calls end, context manager ends on exception
+  - `TestPersistence` (2): turns survive close+reopen, multiple sessions isolated
+  - `TestGetHistory` (2): returns copy not reference, `get_full_history` chronological
+
+#### Design Decisions
+- **Evict in pairs** - never leaves a dangling user message with no assistant reply; coherence preserved for LLM context
+- **SQLite retains everything** - eviction only affects what reaches the LLM; `get_full_history()` supports Week 5 WER evaluation
+- **Resume uses stored prompt** - mid-conversation config changes cannot corrupt in-progress sessions; explicit `system_prompt=` override ignored on resume
+- **WAL mode** - keeps reads non-blocking while call is actively writing turns
+
+#### Test Results (WSL2, Python 3.13.5)
+- tests/test_conversation.py: 54 passed in 0.30s
+- Full suite (pytest tests/):  160 passed, 10 skipped in 1.33s
+- Full suite (--run-integration): 170 passed in 22.08s
+
+No regressions across existing tests.
+
+#### Issues
+- None.
+
+#### Carries to Day 2
+- `src/llm_client.py` - extend with `stream_generate()` that buffers tokens into sentences on `.?!`, measures time-to-first-sentence
+- `tests/test_llm_streaming.py`
