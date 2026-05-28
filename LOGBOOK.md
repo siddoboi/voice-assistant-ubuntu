@@ -385,3 +385,5 @@ No regressions across existing tests.
 #### Carries to Day 2
 - `src/llm_client.py` - extend with `stream_generate()` that buffers tokens into sentences on `.?!`, measures time-to-first-sentence
 - `tests/test_llm_streaming.py`
+
+
