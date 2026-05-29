@@ -328,6 +328,42 @@ def resample_8_to_16k(audio_array: np.ndarray) -> np.ndarray:
     return resampled
 
 
+def reduce_noise(audio_array, sample_rate=None, config_path=None):
+    """Spectral noise suppression via noisereduce, applied before VAD/ASR."""
+    if not isinstance(audio_array, np.ndarray):
+        raise TypeError(f"audio_array must be np.ndarray, got {type(audio_array).__name__}")
+    if audio_array.ndim != 1:
+        raise ValueError(f"reduce_noise expects a 1-D mono array, got shape {audio_array.shape}")
+    if audio_array.size == 0:
+        raise ValueError("audio_array is empty")
+
+    nr_cfg = _get_config(config_path).get("noise_reduction", {}) or {}
+    if not nr_cfg.get("enabled", True):
+        return audio_array
+
+    sr = int(sample_rate if sample_rate is not None else _audio_cfg("sample_rate", 16000, config_path))
+    if sr <= 0:
+        raise ValueError(f"sample_rate must be > 0, got {sr}")
+
+    stationary = bool(nr_cfg.get("stationary", False))
+    prop_decrease = float(nr_cfg.get("prop_decrease", 1.0))
+
+    import noisereduce as nr  # lazy: keeps audio_io import light and optional
+
+    original_dtype = audio_array.dtype
+    if np.issubdtype(original_dtype, np.integer):
+        y = audio_array.astype(np.float32) / 32768.0
+    else:
+        y = audio_array.astype(np.float32, copy=False)
+
+    reduced = nr.reduce_noise(y=y, sr=sr, stationary=stationary, prop_decrease=prop_decrease)
+    reduced = np.asarray(reduced, dtype=np.float32)
+
+    if np.issubdtype(original_dtype, np.integer):
+        info = np.iinfo(np.int16)
+        reduced = np.clip(reduced * 32768.0, info.min, info.max).astype(np.int16)
+    return reduced
+
 # ---------------------------------------------------------------------------
 # WAV file I/O
 # ---------------------------------------------------------------------------
