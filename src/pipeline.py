@@ -1,73 +1,90 @@
 """
-pipeline.py — Hardcoded voice assistant chain (Phase 1, Week 2 Day 3).
+pipeline.py — Streaming voice assistant chain (Week 3 Day 4).
 
-The minimum viable end-to-end loop. Records for a fixed duration, transcribes,
-queries the LLM, synthesises the reply, plays it back. No VAD, no streaming,
-no barge-in — those land later in Week 2 Day 5 and Phase 2.
+Replaces the Day 3 hardcoded single-shot chain with a streaming one:
 
-Chain:
-    record(5s)  ->  asr.transcribe  ->  llm_client.generate  ->  tts.synthesize  ->  audio_io.play
+    record/load -> asr.transcribe
+                -> ConversationManager.add_user_turn / build_messages
+                -> llm_client.stream_sentences_from_messages   (sentence stream)
+                -> tts.synthesize_stream                       (PCM per sentence)
+                -> bounded asyncio.Queue (back-pressure)       -> audio_io.play
 
-Inputs:
-    --duration  : seconds to record (default 5, from dev_config.yaml)
-    --input     : optional .wav file path; when provided, skips recording
-                  entirely and runs the chain from that file. Useful on
-                  WSL2 where there's no live microphone.
-    --output    : where to write the TTS reply .wav (default: a timestamped
-                  file under recordings/).
-    --no-play   : skip playback; just write the reply file. WSL2 default.
+Key properties:
+    - Multi-turn memory + system prompt via ConversationManager.
+    - First audio plays as soon as the first sentence is synthesised, while
+      later sentences are still being generated — the streaming latency win.
+    - A bounded asyncio.Queue(maxsize=tts_buffer_max_chunks) sits between TTS
+      synthesis and playback so synthesis cannot run unboundedly ahead and
+      exhaust memory on the Pi (back-pressure).
+    - The full reply text is reassembled from the sentence stream and stored
+      with ConversationManager.add_assistant_turn.
 
-This script is structured so each stage logs its latency. The cumulative
-budget for Phase 1 end-to-end on Pi is ~2-3s per turn; numbers here on
-WSL2 are reference, not representative of Pi.
+run() handles its own ConversationManager session by default (create + end),
+or accepts a caller-supplied `conversation` for multi-turn call loops, in
+which case the caller owns end_session() (called on hangup).
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-# Make `from src import ...` work whether pipeline is run as a module
-# (`python -m src.pipeline`) or as a script (`python src/pipeline.py`).
+import numpy as np
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src import asr, audio_io, llm_client, tts
+from src.conversation import ConversationManager
+
+# Fallbacks (kept from the Day 3 pipeline).
+FALLBACK_TRANSCRIPT = "(no speech detected)"
+FALLBACK_REPLY = "I'm sorry, I didn't quite catch that."
+
+# Sentinel used to close the producer→consumer queue.
+_SENTINEL = object()
 
 
 # ---------------------------------------------------------------------------
-# Stage wrappers — each returns (result, latency_s) and prints a one-liner.
+# Config
+# ---------------------------------------------------------------------------
+
+
+def _max_chunks(config_path: Optional[str]) -> int:
+    """Read pipeline.tts_buffer_max_chunks (default 3) from config.
+
+    Reuses audio_io's cached config loader since the pipeline already depends
+    on audio_io. The bound caps how far TTS synthesis may run ahead of
+    playback before back-pressure pauses it.
+    """
+    cfg = audio_io._get_config(config_path).get("pipeline", {}) or {}
+    value = cfg.get("tts_buffer_max_chunks", 3)
+    return int(value) if int(value) > 0 else 3
+
+
+# ---------------------------------------------------------------------------
+# Record / ASR stages (unchanged in spirit from Day 3)
 # ---------------------------------------------------------------------------
 
 
 def _stage_record(duration_s: float, input_wav: Optional[str]) -> tuple[str, float]:
-    """Either record live or use a pre-recorded .wav.
-
-    Returns the path to the captured audio and the wall-clock seconds spent
-    on this stage. When `input_wav` is supplied, we skip recording entirely
-    and the reported latency is ~0.
-    """
     if input_wav is not None:
         in_path = Path(input_wav)
         if not in_path.exists():
             raise FileNotFoundError(f"Input WAV not found: {in_path}")
-        print(f"[1/5] Using input file: {in_path}  (skipping live record)")
+        print(f"[1/4] Using input file: {in_path}  (skipping live record)")
         return str(in_path), 0.0
 
-    # Live recording path — used on the Pi once it arrives. On WSL2 this
-    # will most likely raise sounddevice.PortAudioError because there's no
-    # audio passthrough; that's expected and is why --input exists.
-    print(f"[1/5] Recording {duration_s:.1f}s of audio ...")
+    print(f"[1/4] Recording {duration_s:.1f}s of audio ...")
     t0 = time.perf_counter()
     audio_array = audio_io.record(duration_sec=duration_s)
     latency = time.perf_counter() - t0
-
-    # Stamp the file so multiple turns in one debug session don't clobber.
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_path = PROJECT_ROOT / "recordings" / f"pipeline_input_{ts}.wav"
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -77,60 +94,102 @@ def _stage_record(duration_s: float, input_wav: Optional[str]) -> tuple[str, flo
 
 
 def _stage_asr(audio_path: str) -> tuple[str, float]:
-    print(f"[2/5] Transcribing {audio_path} ...")
+    print(f"[2/4] Transcribing {audio_path} ...")
     t0 = time.perf_counter()
     result = asr.transcribe(audio_path)
     latency = time.perf_counter() - t0
-    text = result.get("text", "").strip()
+    text = (result.get("text") or "").strip()
     print(f"      text: {text!r}  ({latency:.3f}s)")
     if not text:
-        # Empty transcripts are common when --input is a sine wave; we still
-        # need *some* prompt to feed the LLM, otherwise it hallucinates.
-        text = "(no speech detected)"
+        text = FALLBACK_TRANSCRIPT
     return text, latency
 
 
-def _stage_llm(prompt: str, model: Optional[str]) -> tuple[str, float]:
-    print(f"[3/5] LLM generating reply ...")
-    t0 = time.perf_counter()
-    # The master context locks llm_client.generate(prompt, model) -> {text, latency_s}.
-    # If a project-specific signature differs, this is the only call site
-    # in the pipeline that needs adjustment.
-    if model is None:
-        result = llm_client.generate(prompt)
-    else:
-        result = llm_client.generate(prompt, model=model)
-    latency = time.perf_counter() - t0
-    reply = (result.get("text") or "").strip()
-    print(f"      reply: {reply!r}  ({latency:.3f}s)")
-    if not reply:
-        reply = "I'm sorry, I didn't quite catch that."
-    return reply, latency
+# ---------------------------------------------------------------------------
+# Streaming LLM -> TTS -> playback with a bounded queue (back-pressure)
+# ---------------------------------------------------------------------------
 
 
-def _stage_tts(text: str, output_wav: str) -> tuple[str, float]:
-    print(f"[4/5] Synthesising reply ...")
-    t0 = time.perf_counter()
-    result = tts.synthesize(text, output_wav)
-    latency = time.perf_counter() - t0
-    print(
-        f"      wrote {result['output_path']}  "
-        f"(audio={result['duration_s']:.2f}s, tts={latency:.3f}s, rtf={result['rtf']:.3f})"
+def _recording_iter(sentence_iter, collected: list[str]):
+    """Pass sentences through to TTS while recording each for the reply text."""
+    for sentence in sentence_iter:
+        collected.append(sentence)
+        yield sentence
+
+
+def _safe_next(gen, stats_holder: dict):
+    """next(gen) that captures the generator's StopIteration.value as stats."""
+    try:
+        return next(gen)
+    except StopIteration as stop:
+        stats_holder["stats"] = stop.value or {}
+        return _SENTINEL
+
+
+def _play_chunk(chunk, sample_rate: int) -> None:
+    audio_io.play(chunk, sample_rate=sample_rate)
+
+
+async def _produce(queue, sentence_iter, sample_rate, tts_stats) -> None:
+    """Synthesise PCM per sentence (off-thread) and feed the bounded queue.
+
+    `await queue.put()` blocks when the queue is full → synthesis pauses →
+    back-pressure. Each synth runs in the default executor so it overlaps
+    with playback of the previous chunk.
+    """
+    loop = asyncio.get_event_loop()
+    gen = tts.synthesize_stream(sentence_iter, sample_rate=sample_rate)
+    try:
+        while True:
+            chunk = await loop.run_in_executor(None, _safe_next, gen, tts_stats)
+            if chunk is _SENTINEL:
+                break
+            await queue.put(chunk)
+    finally:
+        # Always unblock the consumer, even if synthesis/LLM raised — otherwise
+        # the consumer waits on an empty queue forever (deadlock).
+        await queue.put(_SENTINEL)
+
+
+async def _consume(queue, sample_rate, skip_play, t0, result) -> None:
+    """Drain the queue, playing each chunk (off-thread) and timing first audio."""
+    loop = asyncio.get_event_loop()
+    chunks: list = []
+    while True:
+        chunk = await queue.get()
+        if chunk is _SENTINEL:
+            queue.task_done()
+            break
+        if result["first_audio_s"] is None:
+            result["first_audio_s"] = time.perf_counter() - t0
+        chunks.append(chunk)
+        if not skip_play:
+            await loop.run_in_executor(None, _play_chunk, chunk, sample_rate)
+        queue.task_done()
+    result["chunks"] = chunks
+
+
+async def _stream_and_play_async(sentence_iter, sample_rate, max_chunks, skip_play, t0):
+    queue: asyncio.Queue = asyncio.Queue(maxsize=max_chunks)
+    tts_stats: dict = {}
+    result = {"first_audio_s": None, "chunks": []}
+    producer = asyncio.create_task(
+        _produce(queue, sentence_iter, sample_rate, tts_stats)
     )
-    return result["output_path"], latency
+    await _consume(queue, sample_rate, skip_play, t0, result)
+    await producer
+    return result["chunks"], result["first_audio_s"], tts_stats.get("stats", {})
 
 
-def _stage_play(wav_path: str, skip: bool) -> float:
-    if skip:
-        print(f"[5/5] --no-play set; skipping playback")
-        return 0.0
-    print(f"[5/5] Playing {wav_path} ...")
+def _stream_and_play(sentence_iter, sample_rate, max_chunks, skip_play):
+    """Sync wrapper: run the producer/consumer event loop to completion.
+
+    Returns (chunks, first_audio_s, tts_stats).
+    """
     t0 = time.perf_counter()
-    audio_array, sample_rate = audio_io.load_wav(wav_path)
-    audio_io.play(audio_array, sample_rate=sample_rate)
-    latency = time.perf_counter() - t0
-    print(f"      done  ({latency:.3f}s)")
-    return latency
+    return asyncio.run(
+        _stream_and_play_async(sentence_iter, sample_rate, max_chunks, skip_play, t0)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -144,22 +203,29 @@ def run(
     output_wav: Optional[str] = None,
     skip_play: bool = False,
     llm_model: Optional[str] = None,
+    conversation: Optional[ConversationManager] = None,
+    session_id: Optional[str] = None,
+    config_path: Optional[str] = None,
 ) -> dict:
-    """Run one full turn through the hardcoded chain.
+    """Run one streaming turn through the chain.
 
     Args:
-        duration_s: live record duration in seconds (ignored if input_wav given)
-        input_wav: pre-recorded WAV path; bypasses live recording
-        output_wav: where to write the TTS reply; auto-generated if None
-        skip_play: don't play the reply through speakers; just write the file
-        llm_model: optional Ollama model override (default = llm_client default)
+        duration_s: live record duration (ignored if input_wav given).
+        input_wav: pre-recorded WAV path; bypasses live recording.
+        output_wav: where to write the concatenated TTS reply; auto if None.
+        skip_play: don't play through speakers (still writes output_wav).
+        llm_model: optional Ollama model override.
+        conversation: optional caller-owned ConversationManager for multi-turn
+            loops. If None, run() creates and ends its own session.
+        session_id: resume an existing session (only when conversation is None).
+        config_path: optional explicit config path.
 
     Returns:
-        Dict with per-stage latencies and final paths/text — handy for tests
-        and for the Day 5 carry-over once VAD wraps the same chain.
+        Dict with transcript, reply_text, session_id, reply_wav, counts, and a
+        per-stage latency dict.
     """
     print("=" * 60)
-    print("Pipeline (Day 3 hardcoded chain)")
+    print("Pipeline (Day 4 streaming chain)")
     print("=" * 60)
 
     if output_wav is None:
@@ -168,39 +234,88 @@ def run(
         out_path.parent.mkdir(parents=True, exist_ok=True)
         output_wav = str(out_path)
 
-    # ---- 1. record (or load) ----------------------------------------
+    # ---- 1. record / load ----
     input_path, rec_lat = _stage_record(duration_s, input_wav)
 
-    # ---- 2. ASR -----------------------------------------------------
+    # ---- 2. ASR ----
     transcript, asr_lat = _stage_asr(input_path)
 
-    # ---- 3. LLM -----------------------------------------------------
-    reply_text, llm_lat = _stage_llm(transcript, llm_model)
+    sample_rate = tts.output_sample_rate()
+    max_chunks = _max_chunks(config_path)
 
-    # ---- 4. TTS -----------------------------------------------------
-    reply_wav, tts_lat = _stage_tts(reply_text, output_wav)
+    own_conversation = conversation is None
+    if own_conversation:
+        conversation = ConversationManager(config_path=config_path, session_id=session_id)
 
-    # ---- 5. play ----------------------------------------------------
-    play_lat = _stage_play(reply_wav, skip_play)
+    t_stream0 = time.perf_counter()
+    try:
+        # ---- 3. conversation ----
+        conversation.add_user_turn(transcript)
+        messages = conversation.build_messages()
 
-    total = rec_lat + asr_lat + llm_lat + tts_lat + play_lat
+        # ---- 4. stream LLM -> TTS -> play ----
+        print(f"[3/4] Streaming reply (buffer max {max_chunks} chunks) ...")
+        collected: list[str] = []
+        if llm_model is None:
+            sentence_iter = llm_client.stream_sentences_from_messages(messages)
+        else:
+            sentence_iter = llm_client.stream_sentences_from_messages(messages, model=llm_model)
+        chunks, first_audio_s, _ = _stream_and_play(
+            _recording_iter(sentence_iter, collected), sample_rate, max_chunks, skip_play
+        )
+        reply_text = " ".join(collected).strip()
+
+        # Empty reply → speak a fallback so the caller always hears something.
+        if not reply_text:
+            reply_text = FALLBACK_REPLY
+            fb_chunks, fb_first, _ = _stream_and_play(
+                iter([reply_text]), sample_rate, max_chunks, skip_play
+            )
+            chunks = fb_chunks
+            if first_audio_s is None:
+                first_audio_s = fb_first
+
+        conversation.add_assistant_turn(reply_text)
+        session_id_out = conversation.session_id
+    finally:
+        if own_conversation:
+            conversation.end_session()
+
+    stream_lat = time.perf_counter() - t_stream0
+    if first_audio_s is None:
+        first_audio_s = 0.0
+
+    # ---- 5. write concatenated reply wav (debug/inspection) ----
+    print(f"[4/4] Writing reply -> {output_wav}")
+    if chunks:
+        full = np.concatenate(chunks)
+        audio_io.save_wav(full, output_wav, sample_rate=sample_rate)
+
+    total = rec_lat + asr_lat + stream_lat
+    perceived = asr_lat + first_audio_s
+
     print("-" * 60)
-    print(f"Latencies: rec={rec_lat:.3f}s  asr={asr_lat:.3f}s  "
-          f"llm={llm_lat:.3f}s  tts={tts_lat:.3f}s  play={play_lat:.3f}s")
-    print(f"Total wall-clock: {total:.3f}s")
+    print(f"transcript : {transcript!r}")
+    print(f"reply      : {reply_text!r}")
+    print(f"Latencies  : rec={rec_lat:.3f}s asr={asr_lat:.3f}s "
+          f"first_audio={first_audio_s:.3f}s stream={stream_lat:.3f}s")
+    print(f"Perceived (asr+first_audio): {perceived:.3f}s   Total: {total:.3f}s")
     print("=" * 60)
 
     return {
         "input_path": input_path,
         "transcript": transcript,
         "reply_text": reply_text,
-        "reply_wav": reply_wav,
+        "reply_wav": output_wav,
+        "session_id": session_id_out,
+        "num_sentences": len(collected),
+        "num_audio_chunks": len(chunks),
         "latencies": {
             "record_s": rec_lat,
             "asr_s": asr_lat,
-            "llm_s": llm_lat,
-            "tts_s": tts_lat,
-            "play_s": play_lat,
+            "first_audio_s": first_audio_s,
+            "stream_s": stream_lat,
+            "perceived_s": perceived,
             "total_s": total,
         },
     }
@@ -213,20 +328,22 @@ def run(
 
 def _build_arg_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        description="Hardcoded voice assistant pipeline (Day 3): "
-                    "record/load -> ASR -> LLM -> TTS -> play."
+        description="Streaming voice assistant pipeline (Day 4): "
+                    "record/load -> ASR -> ConversationManager -> streaming "
+                    "LLM -> streaming TTS -> play."
     )
     p.add_argument("--duration", type=float, default=5.0,
                    help="Seconds to record (ignored if --input given). Default: 5.")
     p.add_argument("--input", type=str, default=None,
                    help="Pre-recorded .wav file to use instead of live mic.")
     p.add_argument("--output", type=str, default=None,
-                   help="Where to write the TTS reply .wav. Default: recordings/pipeline_reply_TS.wav")
+                   help="Where to write the TTS reply .wav.")
     p.add_argument("--no-play", action="store_true",
-                   help="Skip speaker playback. Default on WSL2 where audio passthrough is absent.")
+                   help="Skip speaker playback (still writes the reply file).")
     p.add_argument("--model", type=str, default=None,
-                   help="LLM model override (e.g. 'tinyllama:1.1b'). "
-                        "Default uses llm_client's primary model.")
+                   help="LLM model override (e.g. 'tinyllama:1.1b').")
+    p.add_argument("--session-id", type=str, default=None,
+                   help="Resume an existing ConversationManager session.")
     return p
 
 
@@ -239,13 +356,12 @@ def main(argv: Optional[list[str]] = None) -> int:
             output_wav=args.output,
             skip_play=args.no_play,
             llm_model=args.model,
+            session_id=args.session_id,
         )
     except FileNotFoundError as e:
         print(f"\nERROR: {e}", file=sys.stderr)
         return 2
     except Exception as e:
-        # Don't swallow tracebacks during development — re-raise after a
-        # human-readable line so the cause is obvious in the log.
         print(f"\nERROR ({type(e).__name__}): {e}", file=sys.stderr)
         raise
     return 0
