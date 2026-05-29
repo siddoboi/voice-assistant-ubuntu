@@ -385,3 +385,107 @@ No regressions across existing tests.
 #### Carries to Day 2
 - `src/llm_client.py` - extend with `stream_generate()` that buffers tokens into sentences on `.?!`, measures time-to-first-sentence
 - `tests/test_llm_streaming.py`
+
+---
+
+### Day 2 - LLM Streaming (Sentence-Buffered)
+
+**Theme:** Extend `llm_client.py` with sentence-buffered streaming so TTS can begin synthesising the first sentence while the LLM is still generating the rest.
+
+#### Done
+- `src/llm_client.py` extended — four additions (existing `generate()`, `stream_generate()`, `measure_latency()` unchanged):
+  - `_SENTENCE_TERMINATORS = ".?!"` — module-level constant
+  - `_split_sentences(buffer: str) -> tuple[list[str], str]` — pure helper. Scans buffer for terminator runs; consecutive terminators (`?!`, `...`) count as one break; strips whitespace from each sentence; drops empty fragments; returns `(sentences, remainder)`.
+  - `stream_sentences(prompt, model=None) -> Iterator[str]` — builds on `stream_generate()`. Buffers raw tokens, yields a complete sentence each time a terminator is hit, flushes trailing buffer at stream end (no-terminal-punctuation edge case). `model=None` calls `stream_generate(prompt)` with no model kwarg (PRIMARY_MODEL default); explicit model forwarded as kwarg. Generator return value (`StopIteration.value`) carries stats dict: `{first_token_latency_s, time_to_first_sentence_s, total_latency_s, num_sentences}`. `time_to_first_sentence_s` = first-token → first-sentence (maps to "First sentence assembled" line in the Pi latency budget, 800ms target). Empty chunks from Ollama handled safely.
+  - `measure_first_sentence_latency(prompt, model=None) -> dict` — benchmark wrapper mirroring `measure_latency()`. Drains the generator via manual `next()` loop to capture `StopIteration.value`. Returns `{model, num_sentences, first_token_latency_s, time_to_first_sentence_s, total_latency_s, sentences}`.
+- `tests/test_llm_streaming.py` written — 32 tests (30 unit + 2 integration) across 6 classes:
+  - `TestSplitSentences` (7): single/multi/partial sentence, consecutive terminators, no-terminator, stripping, `?` and `!`
+  - `TestStreamSentencesSplitting` (6): single token, multi-token span, multi-sentence in one token, terminator in own token, stripping
+  - `TestStreamSentencesEdgeCases` (5): no-punctuation flush, trailing partial, empty stream, whitespace-only, empty token chunks
+  - `TestStreamSentencesTiming` (5): stats keys present, num_sentences count, non-negative floats, assembly-gap bracketing (sleep-based), total ≥ first-sentence
+  - `TestStreamSentencesModelForwarding` (2): default omits model kwarg, explicit model forwarded
+  - `TestMeasureFirstSentenceLatency` (5): keys, sentence collection, default/override model field, empty-stream safety
+  - `TestRealStream` (2 integration): live Ollama stream + `generate()` regression guard
+
+#### Design Decisions
+- **Built on `stream_generate()`** — reuses Ollama request logic; model-forwarding testable via `patch.object(llm_client, 'stream_generate', ...)` without touching Ollama.
+- **`time_to_first_sentence_s` = first-token → first-sentence** (not request → first-sentence). Matches the "First sentence assembled" latency budget line (separate from "LLM first token"). Both lines exposed in stats.
+- **Timing via generator return value** — `stream_sentences` stays a clean `Iterator[str]` for Day 4 pipeline; benchmark wrapper captures stats via `StopIteration.value`.
+- **Punctuation-only splitting per spec** — decimals (`3.5`) and abbreviations (`Mr.`) may split early. Documented caveat; acceptable for short conversational replies. Refinable later without changing the public interface.
+- **`model=None` omits model kwarg** (not passes PRIMARY_MODEL) — consistent with `pipeline._stage_llm` convention established in Week 2.
+
+#### Test Results (WSL2, Python 3.13.5)
+- tests/test_llm_streaming.py: 30 passed, 2 skipped in 0.64s
+- Full suite (pytest tests/):  190 passed, 12 skipped in 1.81s
+- Full suite (--run-integration): 202 passed in 42.45s
+
+Zero regressions.
+
+#### No Issues
+
+#### Commit
+`Week 3 Day 2: stream_sentences() with sentence buffering and first-sentence latency measurement`
+Files changed: `src/llm_client.py` (modified), `tests/test_llm_streaming.py` (new)
+
+---
+
+### Day 3 - TTS Streaming + Noise Reduction
+
+**Theme:** Wire sentence-level TTS streaming so PCM playback of sentence N overlaps with synthesis of sentence N+1. Add spectral noise suppression before VAD/ASR.
+
+#### Done
+- `src/tts.py` extended — `synthesize()` unchanged; three additions:
+  - Imports added: `import io`, `from collections.abc import Iterable, Iterator`, `import numpy as np`
+  - `output_sample_rate() -> int` — returns `int(load_voice().config.sample_rate)`. Exposes the voice's native rate (22050 Hz for amy-medium) up front so Day 4's pipeline can pass it to `play()` without coupling to Piper internals. Needed because TTS rate ≠ pipeline's 16000 Hz, and the rate must be known before the first PCM chunk arrives (stats via `StopIteration.value` too late for the first chunk).
+  - `synthesize_stream(sentences, sample_rate=None) -> Iterator[np.ndarray]` — accepts any iterable of sentence strings (list, generator, or `stream_sentences()` output directly). For each non-empty sentence: synthesizes into an in-memory `io.BytesIO` WAV via the **identical `synthesize_wav` path** as batch `synthesize()` (same critical param order: `setnchannels`/`setsampwidth`/`setframerate` before `synthesize_wav`), decodes PCM back to int16 numpy, yields the array. Skips empty/whitespace sentences and zero-frame PCM. `sample_rate=None` defaults to `voice.config.sample_rate`. Raises `ValueError` for non-positive rate. Generator return value (`StopIteration.value`): `{time_to_first_audio_s, total_latency_s, num_sentences, sample_rate}`. `time_to_first_audio_s` = stream-start → first chunk ready (the "TTS first audio" latency budget line).
+
+- `src/audio_io.py` extended — one new function:
+  - `reduce_noise(audio_array, sample_rate=None, config_path=None) -> np.ndarray` — spectral noise suppression via noisereduce, applied before VAD/ASR. Validates: must be 1-D numpy, non-empty, positive sample rate. Config-toggleable: `noise_reduction.enabled: false` returns input unchanged (passthrough, same object). Dtype-preserving: int16 → normalise to float32 → denoise → rescale + clip → int16; float32 → denoise → float32. Passes `stationary` and `prop_decrease` from config to `noisereduce.reduce_noise`. Explicit `sample_rate` arg overrides config value. **Lazy import** (`import noisereduce as nr` inside the function) — keeps `audio_io` import light and non-breaking before the package is installed.
+
+- `configs/dev_config.yaml` extended — new `noise_reduction:` section:
+```yaml
+  noise_reduction:
+    enabled: true
+    stationary: false    # adapts to changing noise; better for varied call audio
+    prop_decrease: 1.0   # 0.0 = no reduction, 1.0 = maximum
+```
+
+- `pip install noisereduce` — installed Week 3 Day 3.
+
+- `tests/test_tts_streaming.py` written — 21 tests (19 unit + 2 integration) across 5 classes:
+  - `TestOutputSampleRate` (2): returns voice config rate, returns int
+  - `TestSynthesizeStreamCore` (5): one chunk per sentence, int16 ndarray, non-empty, PCM roundtrip, **critical param order guard** (asserts `nchannels`/`sampwidth`/`framerate` set before `synthesize_wav` call)
+  - `TestSynthesizeStreamInput` (4): skips empty/whitespace, accepts generator, empty iterable, strips sentence before synthesis
+  - `TestSynthesizeStreamStats` (7): keys present, count, first-audio float, total ≥ first-audio, default sr, override sr, invalid sr rejected
+  - `TestSynthesizeStreamChaining` (1): real `stream_sentences()` → `synthesize_stream()` with both LLM and voice mocked — confirms the two streaming layers chain cleanly end-to-end
+  - `TestRealVoiceStream` (2 integration): real Piper voice + `synthesize()` regression guard
+
+- `tests/test_audio_io.py` extended — three new classes appended (13 tests: 12 unit + 1 integration):
+  - `TestReduceNoiseValidation` (4): non-ndarray, 2D array, empty, non-positive sample rate
+  - `TestReduceNoiseBehaviour` (8): disabled passthrough (same object), int16→int16, float32→float32, sr forwarded, sr override, stationary+prop_decrease forwarded, missing section defaults to enabled, output length preserved
+  - `TestReduceNoiseReal` (1 integration): real noisereduce on noisy 440Hz tone; asserts noise power drops post-reduction
+  - Also added `from unittest.mock import patch` and `import yaml` to top-level imports; added `_write_config()` config helper fixture; removed duplicate `from __future__ import annotations` that caused SyntaxError at line 442
+
+#### Design Decisions
+- **`synthesize_stream` reuses `synthesize_wav` verbatim** via in-memory BytesIO round-trip. Guarantees byte-identical audio to batch path, preserves the "critical param order" contract, and adds zero new Piper API surface. The per-sentence WAV encode+decode is negligible (µs) vs synthesis time.
+- **`output_sample_rate()` helper** instead of yielding `(pcm, rate)` tuples. Rate is constant per stream and needed before the first chunk. Day 4 pipeline calls it once.
+- **Lazy noisereduce import** inside `reduce_noise()`. `audio_io` is imported by the whole pipeline; hard-depending at module level would slow startup and break import if noisereduce not yet installed.
+- **Noise reduction is dtype-preserving** — mirrors `resample_8_to_16k()` convention. int16 in → int16 out; float32 in → float32 out. Preserves pipeline's dtype invariants.
+- **Config toggle `enabled: false` returns input unchanged** — lets Pi disable noise reduction if latency budget is too tight (per the RNNoise fallback note in master doc Section 4.1).
+- **`stationary: false`** default — non-stationary mode adapts to changing background noise, better for varied GSM call environments than stationary (constant-noise assumption).
+
+#### Test Results (WSL2, Python 3.13.5) — expected
+- tests/test_tts_streaming.py:  19 passed, 2 skipped
+- tests/test_audio_io.py:       46 passed, 1 skipped
+- Full suite (pytest tests/):   221 passed, 15 skipped
+- Full suite (--run-integration): 236 passed
+
+#### Carries to Day 4
+- Wire `ConversationManager` + `stream_sentences()` + `synthesize_stream()` into `src/pipeline.py` in one loop
+- `asyncio.Queue(maxsize=3)` between TTS synthesis and playback (buffer overflow prevention subtask)
+- `pipeline.tts_buffer_max_chunks: 3` config key in `dev_config.yaml`
+- `tts.output_sample_rate()` used for playback rate
+- Full reply text accumulated from sentence stream → `conversation.add_assistant_turn()`
+- `conversation.end_session()` called on hangup
+- End-to-end latency measured on `sample1.wav`
+- `tests/test_pipeline.py` updated
