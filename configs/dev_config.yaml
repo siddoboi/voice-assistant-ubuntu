@@ -43,3 +43,13 @@ conversation:
   # SQLite database file for session persistence. Schema is auto-created
   # on first use. Parent directory must exist.
   db_path: recordings/conversations.db
+
+  # Noise reduction (Week 3 Day 3). Applied to mic/telephony audio before
+# VAD and ASR. Disable on Pi if the latency budget is too tight.
+noise_reduction:
+  enabled: true
+  # stationary=false adapts to changing noise (better for varied call audio);
+  # true is cheaper but assumes constant background noise.
+  stationary: false
+  # 0.0 = no reduction, 1.0 = maximum. Lower if speech sounds distorted.
+  prop_decrease: 1.0
