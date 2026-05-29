@@ -15,6 +15,8 @@ Coverage:
     - list_devices() returns a list and does not crash even when PortAudio
       has no devices
     - Config loading: defaults applied when keys missing, env-var override
+    - reduce_noise(): validation, config toggle, dtype preservation,
+      param forwarding (Week 3 Day 3)
 
 Run with:
     pytest tests/test_audio_io.py -v
@@ -26,9 +28,11 @@ import os
 import wave
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import numpy as np
 import pytest
+import yaml
 
 # Make 'src' importable when running pytest from the project root.
 import sys
@@ -76,6 +80,28 @@ def sine_16k_int16() -> np.ndarray:
 def tmp_wav_path(tmp_path: Path) -> Path:
     """Path to a writable .wav file inside pytest's tmp_path."""
     return tmp_path / "test.wav"
+
+
+def _write_config(
+    tmp_path: Path,
+    *,
+    enabled=True,
+    stationary=False,
+    prop_decrease=1.0,
+    sample_rate=16000,
+    include_nr=True,
+) -> Path:
+    """Write a minimal config (with optional noise_reduction section) to disk."""
+    cfg = {"audio": {"sample_rate": sample_rate, "channels": 1}, "paths": {}}
+    if include_nr:
+        cfg["noise_reduction"] = {
+            "enabled": enabled,
+            "stationary": stationary,
+            "prop_decrease": prop_decrease,
+        }
+    p = tmp_path / "dev_config.yaml"
+    p.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    return p
 
 
 # ---------------------------------------------------------------------------
@@ -427,3 +453,121 @@ class TestConfigLoading:
 
         cfg = audio_io._get_config(explicit_cfg)
         assert cfg["audio"]["sample_rate"] == 44100
+
+
+# ---------------------------------------------------------------------------
+# reduce_noise — Week 3 Day 3 (noisereduce mocked in unit tests)
+# ---------------------------------------------------------------------------
+
+
+class TestReduceNoiseValidation:
+    def test_rejects_non_ndarray(self, tmp_path: Path) -> None:
+        cfg = _write_config(tmp_path)
+        with pytest.raises(TypeError, match="must be np.ndarray"):
+            audio_io.reduce_noise([1, 2, 3], config_path=cfg)  # type: ignore[arg-type]
+
+    def test_rejects_2d_array(self, tmp_path: Path) -> None:
+        cfg = _write_config(tmp_path)
+        arr = np.zeros((10, 2), dtype=np.int16)
+        with pytest.raises(ValueError, match="1-D mono"):
+            audio_io.reduce_noise(arr, config_path=cfg)
+
+    def test_rejects_empty(self, tmp_path: Path) -> None:
+        cfg = _write_config(tmp_path)
+        with pytest.raises(ValueError, match="empty"):
+            audio_io.reduce_noise(np.array([], dtype=np.int16), config_path=cfg)
+
+    def test_rejects_non_positive_sample_rate(self, tmp_path: Path) -> None:
+        cfg = _write_config(tmp_path)
+        arr = np.zeros(100, dtype=np.int16)
+        with pytest.raises(ValueError, match="sample_rate must be > 0"):
+            audio_io.reduce_noise(arr, sample_rate=0, config_path=cfg)
+
+
+class TestReduceNoiseBehaviour:
+    def test_disabled_returns_input_unchanged(self, tmp_path: Path) -> None:
+        cfg = _write_config(tmp_path, enabled=False)
+        arr = np.array([1, 2, 3, 4], dtype=np.int16)
+        out = audio_io.reduce_noise(arr, config_path=cfg)
+        # Passthrough: same object, no noisereduce import/call needed.
+        assert out is arr
+
+    def test_int16_in_int16_out(self, tmp_path: Path) -> None:
+        cfg = _write_config(tmp_path)
+        arr = np.array([1000, -1000, 2000, -2000], dtype=np.int16)
+        # Mock noisereduce to echo its float input back unchanged.
+        with patch("noisereduce.reduce_noise", side_effect=lambda y, **k: y):
+            out = audio_io.reduce_noise(arr, config_path=cfg)
+        assert out.dtype == np.int16
+        # Echoed float (arr/32768) scaled back ≈ original (within rounding).
+        np.testing.assert_allclose(out, arr, atol=1)
+
+    def test_float32_in_float32_out(self, tmp_path: Path) -> None:
+        cfg = _write_config(tmp_path)
+        arr = np.array([0.1, -0.2, 0.3, -0.4], dtype=np.float32)
+        with patch("noisereduce.reduce_noise", side_effect=lambda y, **k: y):
+            out = audio_io.reduce_noise(arr, config_path=cfg)
+        assert out.dtype == np.float32
+        np.testing.assert_allclose(out, arr, atol=1e-6)
+
+    def test_passes_sample_rate_to_noisereduce(self, tmp_path: Path) -> None:
+        cfg = _write_config(tmp_path, sample_rate=16000)
+        arr = np.zeros(100, dtype=np.float32)
+        with patch("noisereduce.reduce_noise", side_effect=lambda y, **k: y) as m:
+            audio_io.reduce_noise(arr, config_path=cfg)
+        _, kwargs = m.call_args
+        assert kwargs["sr"] == 16000
+
+    def test_explicit_sample_rate_overrides_config(self, tmp_path: Path) -> None:
+        cfg = _write_config(tmp_path, sample_rate=16000)
+        arr = np.zeros(100, dtype=np.float32)
+        with patch("noisereduce.reduce_noise", side_effect=lambda y, **k: y) as m:
+            audio_io.reduce_noise(arr, sample_rate=8000, config_path=cfg)
+        _, kwargs = m.call_args
+        assert kwargs["sr"] == 8000
+
+    def test_passes_stationary_and_prop_decrease(self, tmp_path: Path) -> None:
+        cfg = _write_config(tmp_path, stationary=True, prop_decrease=0.8)
+        arr = np.zeros(100, dtype=np.float32)
+        with patch("noisereduce.reduce_noise", side_effect=lambda y, **k: y) as m:
+            audio_io.reduce_noise(arr, config_path=cfg)
+        _, kwargs = m.call_args
+        assert kwargs["stationary"] is True
+        assert kwargs["prop_decrease"] == 0.8
+
+    def test_missing_nr_section_defaults_to_enabled(self, tmp_path: Path) -> None:
+        cfg = _write_config(tmp_path, include_nr=False)
+        arr = np.zeros(100, dtype=np.float32)
+        with patch("noisereduce.reduce_noise", side_effect=lambda y, **k: y) as m:
+            out = audio_io.reduce_noise(arr, config_path=cfg)
+        # Default enabled → noisereduce IS called, output returned.
+        assert m.called
+        assert out.dtype == np.float32
+
+    def test_output_length_preserved(self, tmp_path: Path) -> None:
+        cfg = _write_config(tmp_path)
+        arr = np.zeros(512, dtype=np.float32)
+        with patch("noisereduce.reduce_noise", side_effect=lambda y, **k: y):
+            out = audio_io.reduce_noise(arr, config_path=cfg)
+        assert out.shape == arr.shape
+
+
+@pytest.mark.integration
+class TestReduceNoiseReal:
+    def test_real_reduces_white_noise_on_tone(self, tmp_path: Path) -> None:
+        cfg = _write_config(tmp_path, sample_rate=16000)
+        # 0.5s 440Hz tone + white noise at 16kHz.
+        sr = 16000
+        t = np.linspace(0, 0.5, sr // 2, endpoint=False, dtype=np.float32)
+        tone = 0.3 * np.sin(2 * np.pi * 440.0 * t).astype(np.float32)
+        rng = np.random.default_rng(0)
+        noisy = (tone + 0.1 * rng.standard_normal(tone.shape).astype(np.float32)).astype(np.float32)
+
+        out = audio_io.reduce_noise(noisy, config_path=cfg)
+
+        assert out.dtype == np.float32
+        assert out.shape == noisy.shape
+        # Residual noise power should drop vs the noisy input.
+        noise_before = float(np.mean((noisy - tone) ** 2))
+        noise_after = float(np.mean((out - tone) ** 2))
+        assert noise_after < noise_before
