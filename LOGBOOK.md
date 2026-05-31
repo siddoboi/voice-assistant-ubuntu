@@ -613,3 +613,98 @@ Zero regressions.
 - SIM7600EI AT-command logic (`connect`, `disconnect`, `answer_call`, `hangup`,
   `send_at`, `wait_for_ring`) with mocked pyserial unit tests
 - `tests/test_gsm_adapter.py`
+
+---
+
+### Day 5 - GSM Adapter Skeleton
+
+**Theme:** SIM7600EI AT-command skeleton, fully unit-tested with mocked
+pyserial. Call audio path out of scope — signalling only. Real-hardware
+validation deferred to Week 4 Day 1 when the Pi arrives.
+
+#### Done
+- `src/telephony/gsm_adapter.py` written from scratch — `GSMAdapter` class:
+  - Config-driven (`telephony:` section in dev_config.yaml; falls back to
+    defaults silently so the skeleton works without config).
+  - Self-contained config loader — does not import audio_io, keeping telephony
+    decoupled from the audio stack.
+  - `connect()` — opens serial port, sends `AT` (link check), `ATE0` (echo
+    off), `AT+CLIP=1` (caller ID). Raises `GSMConnectionError` if port
+    unavailable or module silent.
+  - `disconnect()` — closes port. Idempotent.
+  - `send_at(command, timeout)` — core I/O: writes `command\r\n`, reads lines
+    until final result code, returns intermediate lines on `OK`, raises on
+    `ERROR`/`BUSY`/`+CME ERROR`/etc., raises `GSMTimeout` if no final code
+    arrives. Skips command echo. Resets input buffer before each write.
+  - `check_sim()` / `check_signal()` / `check_registration()` /
+    `is_call_active()` — status queries parsing `+CPIN`, `+CSQ`, `+CREG`,
+    `+CLCC`.
+  - `answer_call()` — `ATA`.
+  - `hangup()` — `AT+CHUP` (clears all calls; more reliable than ATH on
+    SIM7600).
+  - `dial(number)` — `ATD<number>;` (semicolon = voice call, not data).
+  - `wait_for_ring(timeout)` — blocks reading lines for unsolicited `RING`,
+    capturing caller number from preceding `+CLIP:`. Returns
+    `{"event": "RING", "caller": <num|None>}` or `None` on timeout.
+  - Context manager (`__enter__`/`__exit__`) — connect on enter, disconnect
+    on exit even on exception.
+  - Exception hierarchy: `GSMError` (base) → `GSMConnectionError`,
+    `GSMTimeout`, `GSMCommandError`.
+  - Module-level parsers: `_parse_csq`, `_parse_creg`, `_parse_clip`.
+
+- `tests/test_gsm_adapter.py` written — 46 unit tests, 0 integration, 8
+  classes. All tests use `FakeSerial` (a scripted deque of response lines;
+  `readline()` returns `b""` when exhausted, mimicking pyserial's timeout):
+  - `TestConstruction` (4): defaults, explicit overrides, config section read,
+    not-connected before connect.
+  - `TestConnect` (6): port/baudrate/timeout passed to serial.Serial, init
+    sequence (AT/ATE0/CLIP=1), port unavailable, silent module, disconnect
+    closes, disconnect idempotent.
+  - `TestSendAt` (10): terminator written, intermediate lines returned, OK-only
+    returns [], ERROR raises, +CME ERROR raises, BUSY raises, timeout,
+    echo-skip, input-reset, not-connected raises.
+  - `TestStatusQueries` (9): SIM ready/not-ready, signal RSSI, registration
+    home/roaming/unregistered, call active/inactive.
+  - `TestCallControl` (5): ATA sent, AT+CHUP sent, ATD with semicolon, strips
+    whitespace from number, empty number rejected.
+  - `TestWaitForRing` (4): RING detected, caller captured from +CLIP, timeout
+    returns None, not-connected raises.
+  - `TestContextManager` (2): connects on enter / disconnects on exit,
+    disconnects on exception.
+  - `TestParsers` (6): +CSQ, +CSQ bad, +CREG, +CREG bad, +CLIP, +CLIP empty.
+
+- `pip install pyserial` — added to project dependencies.
+
+#### Design Decisions
+- **Signalling only, no audio** — call audio routing (PCM to/from the HAT)
+  is a separate Week 4 concern.
+- **`AT+CHUP` over `ATH`** — clears all calls more reliably on SIM7600.
+- **Semicolon on `ATD`** — `ATD<number>;` = voice; without it the module
+  attempts a data call.
+- **Self-contained config loader** — telephony stays decoupled from audio_io
+  (could run in its own process). Missing config returns {} → defaults apply,
+  no raise.
+- **Echo-skip in send_at** — tolerates module echoing commands before ATE0
+  takes effect in connect().
+- **FakeSerial harness** — `readline()` returns `b""` on exhaustion (real
+  pyserial timeout behaviour), so deadline-loop logic is exercised
+  realistically without hardware.
+
+#### Test Results (WSL2, Python 3.13.5)
+tests/test_gsm_adapter.py:  46 passed in 0.58s
+Full suite (pytest tests/): 287 passed, 15 skipped in 5.44s
+Full suite (--run-integration): 302 passed in 31.41s
+
+Zero regressions.
+
+#### Issues
+- None.
+
+#### Week 3 Summary
+All 5 days complete on WSL2. Pi not arrived.
+Total new tests this week: 141 (54 + 32 + 34 + 36 + 46 — including the
+5 new llm_streaming tests in Day 4).
+Full suite grew from 170 (Week 2 end) to 302 (Week 3 end).
+Pi arrival triggers Week 4: real latency measurement, VAD threshold tuning
+on GSM audio, mic gain optimisation, and wiring gsm_adapter into a real
+call loop.
