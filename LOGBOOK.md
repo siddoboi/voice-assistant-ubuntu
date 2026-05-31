@@ -707,4 +707,6 @@ Total new tests this week: 141 (54 + 32 + 34 + 36 + 46 — including the
 Full suite grew from 170 (Week 2 end) to 302 (Week 3 end).
 Pi arrival triggers Week 4: real latency measurement, VAD threshold tuning
 on GSM audio, mic gain optimisation, and wiring gsm_adapter into a real
-call loop.
+call loop.gir
+
+
