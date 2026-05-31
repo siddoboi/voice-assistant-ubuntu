@@ -58,3 +58,9 @@ noise_reduction:
 # ahead of playback before back-pressure pauses it — caps memory on the Pi.
 pipeline:
   tts_buffer_max_chunks: 3
+
+telephony:
+  port: /dev/ttyUSB2          # SIM7600 HAT AT interface; overridden on Pi
+  baudrate: 115200
+  timeout_s: 2.0
+  ring_poll_timeout_s: 30.0
