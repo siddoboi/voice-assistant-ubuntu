@@ -709,4 +709,3 @@ Pi arrival triggers Week 4: real latency measurement, VAD threshold tuning
 on GSM audio, mic gain optimisation, and wiring gsm_adapter into a real
 call loop.gir
 
-
