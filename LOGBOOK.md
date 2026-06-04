@@ -741,3 +741,13 @@ Four files. No new tests. No new dependencies.
   - `pipeline.tts_buffer_max_chunks: 3` — same as dev
   - `telephony:` section — `port: /dev/ttyUSB2`, `baudrate: 115200`, `timeout_s: 2.0`, `ring_poll_timeout_s: 30.0`
   - `vad.silence_threshold: 0.6` — Pi default for GSM noise floor (see Design Decisions)
+
+- `scripts/tune_vad_threshold.py` written — threshold sweep over a WAV file:
+  - `_load_mono_16k(wav_path)` — loads via `audio_io.load_wav()`, downmixes to mono, normalises int16 → float32, resamples to 16 kHz via `np.interp` (same convention as `vad.test_on_file()`)
+  - `_collect_speech_probs(audio)` — **single VAD pass**: calls `vad.reset_state()` once, then `vad.get_speech_prob()` per 512-sample chunk, stores per-chunk probability array. One model pass for all five thresholds; does not mutate module state.
+  - `_evaluate(probs, threshold)` → `{threshold, total_chunks, speech_chunks, silence_chunks, speech_ratio}` — evaluates stored probs with `>=` (matches `vad.is_speech()` semantics)
+  - `_bar(ratio, width)` — fixed-width ASCII bar for console readability
+  - `sweep(wav_path, output_path)` — runs all 5 thresholds, prints formatted table, saves JSON to `recordings/vad_threshold_results.json`
+  - `main()` / `_parse_args()` — argparse; positional `wav_path`, optional `--output`
+  - Scripts `chdir` to project root (resolved from `__file__`) — required because `vad.py` hardcodes a relative model path that breaks if CWD ≠ project root
+  - Thresholds swept: **0.5, 0.55, 0.6, 0.65, 0.7**
