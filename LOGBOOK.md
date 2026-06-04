@@ -762,3 +762,13 @@ Four files. No new tests. No new dependencies.
   - `run_all(wav_path, output_path)` — calls all five, prints table, saves `recordings/pi_benchmarks.json`
   - `main()` / `_parse_args()` — argparse; optional `--input` (default `recordings/sample1.wav`), optional `--output`
   - Same `chdir`-to-project-root pattern as tune script
+
+- `README.md` written — complete project README:
+  - One-paragraph project description
+  - Hardware requirements list (Pi 5 kit, SIM7600EI HAT, USB audio adapter, TRRS earphones, SIM)
+  - Setup instructions (`git clone` + `bash setup.sh` + `source venv/bin/activate` + `ollama serve &`)
+  - Usage (`python -m src.pipeline --input recordings/sample1.wav`) + helper scripts
+  - Project structure tree (abridged)
+  - Architecture paragraph (streaming pipeline, asyncio.Queue back-pressure, perceived_s metric)
+  - Current status (Phase 1 in progress, Week 4 pending Pi)
+  - Tech stack bullet list
