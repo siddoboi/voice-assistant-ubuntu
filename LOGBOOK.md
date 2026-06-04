@@ -751,3 +751,14 @@ Four files. No new tests. No new dependencies.
   - `main()` / `_parse_args()` — argparse; positional `wav_path`, optional `--output`
   - Scripts `chdir` to project root (resolved from `__file__`) — required because `vad.py` hardcodes a relative model path that breaks if CWD ≠ project root
   - Thresholds swept: **0.5, 0.55, 0.6, 0.65, 0.7**
+
+- `scripts/benchmark_pi.py` written — full benchmark suite, formatted table + JSON:
+  - `benchmark_llm()` — `llm_client.measure_latency()` on both `PRIMARY_MODEL` and `FALLBACK_MODEL`
+  - `benchmark_asr(wav_path)` — `asr.transcribe()`; RTF = `latency_s / duration_s`
+  - `benchmark_tts()` — `tts.output_sample_rate()` then `tts.synthesize_stream()` over 5 standard sentences; RTF = `synth_time / audio_duration_s`; captures `time_to_first_audio_s` via `StopIteration.value`
+  - `benchmark_vad(wav_path)` — `vad.test_on_file()`; reports `speech_ratio`, `latency_s`, `threshold_used` (module default)
+  - `benchmark_e2e(wav_path)` — `pipeline.run(input_wav=..., skip_play=True)`; reports `perceived_s`, `asr_s`, `first_audio_s`, `stream_s`, `total_s`
+  - `print_table(report)` — aligned text table: LLM section + ASR/TTS/VAD section + E2E section
+  - `run_all(wav_path, output_path)` — calls all five, prints table, saves `recordings/pi_benchmarks.json`
+  - `main()` / `_parse_args()` — argparse; optional `--input` (default `recordings/sample1.wav`), optional `--output`
+  - Same `chdir`-to-project-root pattern as tune script
