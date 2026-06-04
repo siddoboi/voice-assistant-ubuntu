@@ -721,3 +721,9 @@ latency profiling on real hardware. WSL2 pre-Pi prep tasks completed first.
 **Pi 5 status: ⏳ Not yet arrived — Day 1 Pi tasks deferred. Pre-Pi prep done.**
 
 ---
+
+### Pre-Pi Prep — WSL2-safe groundwork before Pi arrival
+
+**Theme:** Write all files that can be completed without the Pi so that
+Day 1 hardware setup involves filling in measured values, not writing code.
+Four files. No new tests. No new dependencies.
