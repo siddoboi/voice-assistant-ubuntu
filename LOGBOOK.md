@@ -772,3 +772,11 @@ Four files. No new tests. No new dependencies.
   - Current status (Phase 1 in progress, Week 4 pending Pi)
   - Tech stack bullet list
 
+#### Design Decisions
+
+- **`tune_vad_threshold.py` uses `get_speech_prob()` single-pass** — `vad.test_on_file()` cannot be reused for a sweep because it bakes in `SILENCE_THRESHOLD` via `is_speech()`. One pass collects raw probabilities; all five thresholds evaluated against the stored array. Avoids module-state mutation; 5× faster than five separate passes.
+- **`vad.silence_threshold: 0.6` in `pi_config.yaml` is currently inert** — `vad.py` reads `SILENCE_THRESHOLD = 0.5` as a module-level constant; it does not load any config file. Wiring `vad.py` to read from config is a **Week 4 code change**, not a YAML edit. The key documents intent and serves as the reference point for `tune_vad_threshold.py`.
+- **Scripts `chdir` to project root** — both scripts resolve `_PROJECT_ROOT` from `__file__` and call `os.chdir(_PROJECT_ROOT)`. Required because `vad.py`'s `MODEL_PATH` is relative — running from `scripts/` without chdir breaks model load.
+- **`noise_reduction.enabled: false` on Pi** — latency impact of noisereduce on ARM is unknown. Measure on Day 1 via benchmark suite, enable only if the 3.5s budget has room.
+- **`scripts/` is a new directory** — did not previously exist in the repo. Created during commit.
+
