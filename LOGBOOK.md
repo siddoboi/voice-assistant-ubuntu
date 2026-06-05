@@ -613,3 +613,11 @@ Zero regressions.
 - SIM7600EI AT-command logic (`connect`, `disconnect`, `answer_call`, `hangup`,
   `send_at`, `wait_for_ring`) with mocked pyserial unit tests
 - `tests/test_gsm_adapter.py`
+
+---
+
+### Day 5 - GSM Adapter Skeleton
+
+**Theme:** SIM7600EI AT-command skeleton, fully unit-tested with mocked
+pyserial. Call audio path out of scope — signalling only. Real-hardware
+validation deferred to Week 4 Day 1 when the Pi arrives.
