@@ -780,3 +780,8 @@ Four files. No new tests. No new dependencies.
 - **`noise_reduction.enabled: false` on Pi** — latency impact of noisereduce on ARM is unknown. Measure on Day 1 via benchmark suite, enable only if the 3.5s budget has room.
 - **`scripts/` is a new directory** — did not previously exist in the repo. Created during commit.
 
+#### Issues
+- None.
+
+#### Test Results
+No tests added or modified. Suite unchanged.
