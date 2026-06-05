@@ -674,3 +674,18 @@ validation deferred to Week 4 Day 1 when the Pi arrives.
   - `TestParsers` (6): +CSQ, +CSQ bad, +CREG, +CREG bad, +CLIP, +CLIP empty.
 
 - `pip install pyserial` — added to project dependencies.
+
+#### Design Decisions
+- **Signalling only, no audio** — call audio routing (PCM to/from the HAT)
+  is a separate Week 4 concern.
+- **`AT+CHUP` over `ATH`** — clears all calls more reliably on SIM7600.
+- **Semicolon on `ATD`** — `ATD<number>;` = voice; without it the module
+  attempts a data call.
+- **Self-contained config loader** — telephony stays decoupled from audio_io
+  (could run in its own process). Missing config returns {} → defaults apply,
+  no raise.
+- **Echo-skip in send_at** — tolerates module echoing commands before ATE0
+  takes effect in connect().
+- **FakeSerial harness** — `readline()` returns `b""` on exhaustion (real
+  pyserial timeout behaviour), so deadline-loop logic is exercised
+  realistically without hardware.
