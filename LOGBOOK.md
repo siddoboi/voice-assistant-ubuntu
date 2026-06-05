@@ -651,3 +651,26 @@ validation deferred to Week 4 Day 1 when the Pi arrives.
   - Exception hierarchy: `GSMError` (base) → `GSMConnectionError`,
     `GSMTimeout`, `GSMCommandError`.
   - Module-level parsers: `_parse_csq`, `_parse_creg`, `_parse_clip`.
+
+- `tests/test_gsm_adapter.py` written — 46 unit tests, 0 integration, 8
+  classes. All tests use `FakeSerial` (a scripted deque of response lines;
+  `readline()` returns `b""` when exhausted, mimicking pyserial's timeout):
+  - `TestConstruction` (4): defaults, explicit overrides, config section read,
+    not-connected before connect.
+  - `TestConnect` (6): port/baudrate/timeout passed to serial.Serial, init
+    sequence (AT/ATE0/CLIP=1), port unavailable, silent module, disconnect
+    closes, disconnect idempotent.
+  - `TestSendAt` (10): terminator written, intermediate lines returned, OK-only
+    returns [], ERROR raises, +CME ERROR raises, BUSY raises, timeout,
+    echo-skip, input-reset, not-connected raises.
+  - `TestStatusQueries` (9): SIM ready/not-ready, signal RSSI, registration
+    home/roaming/unregistered, call active/inactive.
+  - `TestCallControl` (5): ATA sent, AT+CHUP sent, ATD with semicolon, strips
+    whitespace from number, empty number rejected.
+  - `TestWaitForRing` (4): RING detected, caller captured from +CLIP, timeout
+    returns None, not-connected raises.
+  - `TestContextManager` (2): connects on enter / disconnects on exit,
+    disconnects on exception.
+  - `TestParsers` (6): +CSQ, +CSQ bad, +CREG, +CREG bad, +CLIP, +CLIP empty.
+
+- `pip install pyserial` — added to project dependencies.
