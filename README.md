@@ -28,3 +28,14 @@ source venv/bin/activate
 ollama serve &
 ```
 
+`setup.sh` installs system packages, creates the Python 3.13 virtual
+environment, installs the Python dependencies, pulls the Ollama models, and
+downloads the Piper TTS voice and Silero VAD v4 model. It runs identically on
+WSL2 Debian Trixie and Raspberry Pi OS 64-bit.
+
+On the Pi, activate the Pi configuration before running:
+
+```bash
+export VOICE_ASSISTANT_CONFIG=configs/pi_config.yaml
+```
+
