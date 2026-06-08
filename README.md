@@ -86,3 +86,17 @@ voice-assistant/
 └── setup.sh
 ```
 
+## Architecture
+
+The core is a streaming pipeline that overlaps language-model generation with
+speech synthesis and playback to minimise perceived latency. Transcribed
+caller text is sent to the local LLM, whose token stream is buffered into
+complete sentences as they form. Each finished sentence is synthesized to
+audio immediately and pushed onto a bounded `asyncio.Queue`, while a separate
+consumer task pulls audio off the queue and plays it. The queue's maximum size
+applies back-pressure — synthesis pauses when playback falls behind — which
+caps memory use on the 4 GB Pi and lets the first words of a reply play before
+the full response has finished generating. Perceived latency is measured as
+ASR time plus time-to-first-audio, reflecting the gap between the caller
+finishing speaking and hearing the first word back.
+
