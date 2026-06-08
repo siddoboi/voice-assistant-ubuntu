@@ -100,3 +100,13 @@ the full response has finished generating. Perceived latency is measured as
 ASR time plus time-to-first-audio, reflecting the gap between the caller
 finishing speaking and hearing the first word back.
 
+## Current Status
+
+**Phase 1 in progress.** Weeks 1–3 are complete: core modules, the streaming
+pipeline, multi-turn conversation management with SQLite persistence, GSM
+call-control signalling, and config-toggleable noise reduction, backed by a
+passing unit and integration test suite. Week 4 (live GSM call audio routing,
+full call lifecycle, on-Pi VAD/mic tuning) begins when the Pi 5 hardware
+arrives. Weeks 5–6 cover WER and latency evaluation, stability testing, and
+packaging as a systemd service.
+
