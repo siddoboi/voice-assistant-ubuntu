@@ -18,3 +18,13 @@ modelling, and speech synthesis run locally on the Pi.
 Development is done on WSL2 (Debian Trixie); only live audio, GSM calls, and
 latency profiling require the Pi.
 
+## Setup
+
+```bash
+git clone https://github.com/siddoboi/voice-assistant.git
+cd voice-assistant
+bash setup.sh
+source venv/bin/activate
+ollama serve &
+```
+
