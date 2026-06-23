@@ -1,0 +1,50 @@
+{
+  "input": "recordings/sample1.wav",
+  "timestamp": "2026-06-23T11:03:53",
+  "llm": {
+    "primary": {
+      "model": "llama3.2:1b-instruct-q4_K_M",
+      "first_token_latency_s": 0.265,
+      "total_latency_s": 1.991,
+      "response": "The answer to 2 plus 2 is four, as the correct calculation yields 4."
+    },
+    "fallback": {
+      "model": "tinyllama:1.1b",
+      "first_token_latency_s": 0.081,
+      "total_latency_s": 0.678,
+      "response": "Answer: 4"
+    }
+  },
+  "asr": {
+    "model": "tiny.en",
+    "duration_s": 3.0,
+    "latency_s": 0.439,
+    "rtf": 0.1463,
+    "transcript_preview": "You"
+  },
+  "tts": {
+    "model": "en_US-amy-medium",
+    "sample_rate": 22050,
+    "num_sentences": 5,
+    "audio_duration_s": 17.171,
+    "synth_time_s": 0.704,
+    "time_to_first_audio_s": 0.182,
+    "rtf": 0.041
+  },
+  "vad": {
+    "model": "silero_vad_v4",
+    "threshold_used": 0.6,
+    "speech_ratio": 0.0,
+    "latency_s": 0.109,
+    "total_chunks": 187
+  },
+  "e2e": {
+    "perceived_s": 2.0765100870003153,
+    "asr_s": 0.4350253390002763,
+    "first_audio_s": 1.641484748000039,
+    "stream_s": 1.9490491599999586,
+    "total_s": 2.384074499000235,
+    "num_sentences": 3,
+    "num_audio_chunks": 3
+  }
+}

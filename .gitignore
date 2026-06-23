@@ -21,3 +21,5 @@ recordings/
 # Logs
 *.log
 !recordings/.gitkeep
+!recordings/sample1.wav
+!recordings/ubuntu_benchmarks.json
