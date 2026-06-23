@@ -1070,3 +1070,68 @@ Phase 0a software complete. Pending: live voice test (speak into mic, hear TTS r
 
 #### Status
 Phase 0a software complete. Pending: live voice test (speak into mic, hear TTS response through earphones). Phase 0b (A7672S GSM module) starts after live voice test confirms end-to-end pipeline.
+
+---
+
+### Phase 0a — Live Voice Tests + Tuning (Days 3-4 completion)
+
+**Theme:** First live voice interaction, ASR tuning, VAD threshold sweep, model upgrade.
+
+#### Audio Pipeline Fixes (discovered during live test)
+- sounddevice does not accept ALSA plughw: strings - requires PortAudio integer device index
+- Device 13 (PipeWire input) hung on sd.rec() - switched to device 5 (ALC256 hw:2,0 direct)
+- Device 5 native rate: 44100Hz stereo - pipeline was saving WAV at wrong rate (16000) causing ASR hallucinations
+- Fixed: record at 44100Hz stereo, downmix to mono, resample to 16kHz before ASR
+- Output: device 7 (PipeWire) accepts any sample rate via internal resampling
+
+#### ASR Upgrade
+- tiny.en -> small.en: dramatic accuracy improvement on Indian English
+- Added initial_prompt="Indian English speaker." to faster_whisper transcribe call
+- Made MODEL_SIZE config-driven via _load_model_size() reading asr.model_size from YAML
+- Persistent error pattern: "full form" -> "freedom/perform/freedom of" (acoustic, not model)
+- Fix: speak slower, rephrase as statement ("I want to know full form of X")
+
+#### LLM Upgrade
+- llama3.2:1b -> llama3.2:3b-instruct-q4_K_M (2.0GB)
+- 1B model ignored "one sentence only" system prompt consistently
+- 3B model follows instruction on factual questions, still verbose on social turns
+- System prompt tightened: "MAXIMUM one sentence. No lists. No explanations."
+
+#### Markdown Stripping
+- Added _clean_sentence() to pipeline.py - strips *, bullet markers, \n, parentheticals
+- Applied in _recording_iter() before TTS and before conversation history storage
+
+#### VAD Threshold Tuning
+- Recorded 10s voice sample, ran tune_vad_threshold.py sweep
+- Results: 0.50=46.5% speech, 0.55=39.4%, 0.60=32.1%, 0.65=23.7%, 0.70=15.1%
+- Selected 0.55 - catches softer onset without false triggers from room noise
+- Previous 0.60 was clipping utterance starts (first word lost before onset confirmed)
+
+#### Live Test Results (best session, threshold 0.55, small.en, 3B LLM)
+
+| Intended | Heard | Result |
+|---|---|---|
+| What is the full form of TWS? | What is the full form of TWS? | CORRECT |
+| (gave hint: like a headset) | It is like a headset or an earphone or something like that. | CORRECT |
+| Yes, you were correct. | Yes, you were correct. | CORRECT |
+| That would be all. | No, that would be all. | CORRECT (minor prefix) |
+
+Multi-turn reasoning worked: LLM did not know TWS, user gave hint, LLM correctly deduced True Wireless Stereo from context. Conversation memory functioning correctly.
+
+#### Final Config (Phase 0a)
+- input_device: 5 (ALC256 hw:2,0, 44100Hz stereo)
+- output_device: 7 (PipeWire, accepts any rate)
+- silence_threshold: 0.55
+- asr.model_size: small.en
+- llm.primary_model: llama3.2:3b-instruct-q4_K_M
+- llm.fallback_model: tinyllama:1.1b
+
+#### Known Limitations (carry to Phase 0b)
+- Barge-in not implemented - must wait for TTS to finish before speaking
+- "full form" consistently misheard as "freedom/perform" - acoustic issue
+- 3B LLM verbose on social turns despite system prompt
+- perceived_s 6-9s on real speech (benchmark was 2.077s on silence - not representative)
+
+#### Phase 0a Status: COMPLETE
+All software tasks done. Live voice pipeline confirmed working end-to-end.
+Pending before Phase 0b: none.
