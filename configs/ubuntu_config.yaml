@@ -23,7 +23,7 @@ asr:
   language: "en"
 
 llm:
-  primary_model: "llama3.2:1b-instruct-q4_K_M"
+  primary_model: "llama3.2:3b-instruct-q4_K_M"
   fallback_model: "tinyllama:1.1b"
   ollama_host: "http://127.0.0.1:11434"
   max_tokens: 150
