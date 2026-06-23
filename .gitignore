@@ -20,3 +20,4 @@ recordings/
 
 # Logs
 *.log
+!recordings/.gitkeep
