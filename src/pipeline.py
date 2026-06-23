@@ -25,6 +25,7 @@ which case the caller owns end_session() (called on hangup).
 """
 
 from __future__ import annotations
+import re
 
 import argparse
 import asyncio
@@ -110,11 +111,28 @@ def _stage_asr(audio_path: str) -> tuple[str, float]:
 # ---------------------------------------------------------------------------
 
 
+def _clean_sentence(text: str) -> str:
+    """Strip markdown artifacts that TTS would speak literally."""
+    # Remove bullet/list markers
+    text = re.sub(r'^\s*[\*\-\+]\s+', '', text, flags=re.MULTILINE)
+    # Remove bold/italic markers
+    text = re.sub(r'\*+([^*]+)\*+', r'\1', text)
+    # Remove newlines
+    text = text.replace('\n', ' ').replace('\r', ' ')
+    # Remove parenthetical asides like (as seen in...) that read oddly aloud
+    text = re.sub(r'\([^)]{0,60}\)', '', text)
+    # Collapse multiple spaces
+    text = re.sub(r' {2,}', ' ', text).strip()
+    return text
+
+
 def _recording_iter(sentence_iter, collected: list[str]):
     """Pass sentences through to TTS while recording each for the reply text."""
     for sentence in sentence_iter:
-        collected.append(sentence)
-        yield sentence
+        sentence = _clean_sentence(sentence)
+        if sentence:
+            collected.append(sentence)
+            yield sentence
 
 
 def _safe_next(gen, stats_holder: dict):

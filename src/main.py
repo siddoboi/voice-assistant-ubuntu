@@ -3,6 +3,10 @@ main.py - VAD-driven voice assistant loop for Phase 0a (laptop mic/earphones).
 
 State machine: IDLE -> DETECTING_ONSET -> RECORDING -> PROCESSING -> IDLE
 
+Device records at native rate (48kHz stereo on this machine). Each chunk is
+downmixed to mono and resampled to 16kHz/512 samples for VAD. Native-rate
+chunks are accumulated separately and used for ASR (better quality).
+
 No ring detection in Phase 0a. Press Ctrl+C to stop.
 Phase 0b will extend this with gsm_adapter.wait_for_ring() and answer_call().
 
@@ -31,7 +35,6 @@ os.chdir(_PROJECT_ROOT)
 
 from src import asr, audio_io, tts, vad
 from src.conversation import ConversationManager
-from src import llm_client
 from src import pipeline
 
 # ---------------------------------------------------------------------------
@@ -49,11 +52,49 @@ class _State(Enum):
 # Constants / defaults
 # ---------------------------------------------------------------------------
 
-CHUNK_SIZE   = vad.CHUNK_SIZE    # 512 samples at 16kHz
-SAMPLE_RATE  = vad.SAMPLE_RATE   # 16000
+VAD_CHUNK_SIZE  = vad.CHUNK_SIZE    # 512 samples at 16kHz
+SAMPLE_RATE     = vad.SAMPLE_RATE   # 16000 Hz (VAD requirement)
 
 DEFAULT_ONSET_CHUNKS  = 3    # consecutive above-threshold chunks to start recording
 DEFAULT_OFFSET_CHUNKS = 18   # consecutive below-threshold chunks to end recording (~576ms)
+
+# Keep CHUNK_SIZE alias so existing tests that import it still work
+CHUNK_SIZE = VAD_CHUNK_SIZE
+
+
+# ---------------------------------------------------------------------------
+# Audio helpers
+# ---------------------------------------------------------------------------
+
+def _record_chunk() -> tuple[np.ndarray, np.ndarray]:
+    """Record one VAD-sized window.
+
+    Returns (chunk_16k_mono_int16, chunk_native) where:
+    - chunk_16k_mono_int16: 512 samples at 16kHz mono int16 for VAD
+    - chunk_native: raw recording at device native rate/channels for ASR
+    """
+    chunk_native = audio_io.record(
+        duration_sec=VAD_CHUNK_SIZE / SAMPLE_RATE,
+    )
+
+    # Downmix stereo -> mono
+    if chunk_native.ndim == 2:
+        chunk_mono = chunk_native.mean(axis=1).astype(np.int16)
+    else:
+        chunk_mono = chunk_native
+
+    # Resample to exactly VAD_CHUNK_SIZE samples at 16kHz
+    if len(chunk_mono) != VAD_CHUNK_SIZE:
+        indices = np.linspace(0, len(chunk_mono) - 1, VAD_CHUNK_SIZE)
+        chunk_16k = np.interp(
+            indices,
+            np.arange(len(chunk_mono)),
+            chunk_mono.astype(np.float32)
+        ).astype(np.int16)
+    else:
+        chunk_16k = chunk_mono
+
+    return chunk_16k, chunk_native
 
 
 # ---------------------------------------------------------------------------
@@ -77,19 +118,15 @@ def run_loop(
     state        = _State.IDLE
     onset_count  = 0
     offset_count = 0
-    recorded_chunks: list[np.ndarray] = []
+    vad_chunks:    list[np.ndarray] = []   # 16kHz mono for VAD decisions
+    native_chunks: list[np.ndarray] = []   # native rate for ASR quality
 
     try:
         while True:
-            # Record one chunk from mic
-            chunk = audio_io.record(
-                duration_sec=CHUNK_SIZE / SAMPLE_RATE,
-                sample_rate=SAMPLE_RATE,
-            )
+            chunk_16k, chunk_native = _record_chunk()
 
-            # Convert int16 -> float32 for VAD
-            chunk_f32 = chunk.astype(np.float32) / 32768.0
-
+            # VAD on 16kHz mono float32
+            chunk_f32 = chunk_16k.astype(np.float32) / 32768.0
             prob = vad.get_speech_prob(chunk_f32)
             is_speech = prob >= vad.SILENCE_THRESHOLD
 
@@ -98,10 +135,12 @@ def run_loop(
                 if is_speech:
                     state = _State.DETECTING_ONSET
                     onset_count = 1
-                    recorded_chunks = [chunk]
+                    vad_chunks    = [chunk_16k]
+                    native_chunks = [chunk_native]
 
             elif state == _State.DETECTING_ONSET:
-                recorded_chunks.append(chunk)
+                vad_chunks.append(chunk_16k)
+                native_chunks.append(chunk_native)
                 if is_speech:
                     onset_count += 1
                     if onset_count >= onset_chunks:
@@ -109,13 +148,14 @@ def run_loop(
                         offset_count = 0
                         print("[VAD] Speech onset detected - recording...")
                 else:
-                    # False start - reset
                     state = _State.IDLE
                     onset_count = 0
-                    recorded_chunks = []
+                    vad_chunks    = []
+                    native_chunks = []
 
             elif state == _State.RECORDING:
-                recorded_chunks.append(chunk)
+                vad_chunks.append(chunk_16k)
+                native_chunks.append(chunk_native)
                 if not is_speech:
                     offset_count += 1
                     if offset_count >= offset_chunks:
@@ -126,14 +166,29 @@ def run_loop(
             # ---- processing ----
             if state == _State.PROCESSING:
                 print("[VAD] Silence detected - processing...")
-                audio = np.concatenate(recorded_chunks)
+                # Use native-rate audio for ASR (better quality than resampled)
+                audio_native = np.concatenate(native_chunks)
 
-                # Save to temp WAV for ASR
+                # Downmix stereo -> mono
+                if audio_native.ndim == 2:
+                    audio_mono = audio_native.mean(axis=1).astype(np.int16)
+                else:
+                    audio_mono = audio_native
+
+                # Resample 44100 -> 16000 for ASR
+                n_out = int(len(audio_mono) * 16000 / 44100)
+                indices = np.linspace(0, len(audio_mono) - 1, n_out)
+                audio_16k = np.interp(
+                    indices,
+                    np.arange(len(audio_mono)),
+                    audio_mono.astype(np.float32)
+                ).astype(np.int16)
+
                 with tempfile.NamedTemporaryFile(
                     suffix=".wav", delete=False, dir="recordings"
                 ) as f:
                     tmp_path = f.name
-                audio_io.save_wav(audio, tmp_path, sample_rate=SAMPLE_RATE)
+                audio_io.save_wav(audio_16k, tmp_path, sample_rate=16000)
 
                 try:
                     result = pipeline.run(
@@ -146,11 +201,11 @@ def run_loop(
                 finally:
                     Path(tmp_path).unlink(missing_ok=True)
 
-                # Reset for next turn
-                state        = _State.IDLE
-                onset_count  = 0
-                offset_count = 0
-                recorded_chunks = []
+                state         = _State.IDLE
+                onset_count   = 0
+                offset_count  = 0
+                vad_chunks    = []
+                native_chunks = []
 
     except KeyboardInterrupt:
         print("\nStopping. Ending conversation session.")

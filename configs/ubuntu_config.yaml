@@ -3,10 +3,10 @@
 # Audio: ALC256 Analog via plughw:2,0 (3.5mm TRRS earphone + inline mic)
 
 audio:
-  input_device: "plughw:2,0"
-  output_device: "plughw:2,0"
-  sample_rate: 16000
-  channels: 1
+  input_device: 5
+  output_device: 7
+  sample_rate: 44100
+  channels: 2
   chunk_size: 512
   record_seconds: 5
 
@@ -17,7 +17,7 @@ vad:
   min_silence_duration_ms: 500
 
 asr:
-  model_size: "tiny"
+  model_size: "small.en"
   device: "cpu"
   compute_type: "int8"
   language: "en"

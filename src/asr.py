@@ -6,7 +6,17 @@ Model: tiny.en (Phase 1)
 import time
 from faster_whisper import WhisperModel
 
-MODEL_SIZE = "tiny.en"
+def _load_model_size() -> str:
+    import os, yaml
+    config_path = os.environ.get('VOICE_ASSISTANT_CONFIG', 'configs/dev_config.yaml')
+    try:
+        with open(config_path) as f:
+            cfg = yaml.safe_load(f) or {}
+        return cfg.get('asr', {}).get('model_size', 'tiny.en')
+    except Exception:
+        return 'tiny.en'
+
+MODEL_SIZE = _load_model_size()
 _model = None
 
 
@@ -30,7 +40,7 @@ def transcribe(audio_path: str) -> dict:
     """
     model = load_model()
     start = time.time()
-    segments, info = model.transcribe(audio_path, beam_size=5, language="en")
+    segments, info = model.transcribe(audio_path, beam_size=5, language="en", initial_prompt="Indian English speaker.")
     text = " ".join([seg.text.strip() for seg in segments])
     latency = round(time.time() - start, 3)
     return {
