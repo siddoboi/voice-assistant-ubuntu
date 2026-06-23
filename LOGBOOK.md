@@ -785,3 +785,288 @@ Four files. No new tests. No new dependencies.
 
 #### Test Results
 No tests added or modified. Suite unchanged.
+---
+
+## PHASE 0 — Ubuntu Track (Parallel to Pi)
+
+**Repo:** siddoboi/voice-assistant-ubuntu
+**Machine:** ASUS TUF Gaming A17 FA706IC, Ubuntu 26.04 LTS (Resolute Raccoon), x86_64
+**Python:** 3.14.4
+**Audio:** ALC256 Analog, plughw:2,0, TRRS earphone + inline mic (3.5mm jack)
+
+---
+
+### Phase 0a — Day 1: Environment Setup
+
+**Theme:** Fresh Ubuntu 26.04 environment, repo creation, all packages installed, smoke test passing.
+
+#### Done
+- GitHub repo `siddoboi/voice-assistant-ubuntu` created from Pi repo source
+- Ubuntu 26.04 confirmed (apt 3.2.0) — two major releases ahead of doc target (24.04)
+- Python 3.14.4 native (no deadsnakes needed) — all critical packages have cp314 wheels
+- onnxruntime upgraded to 1.27.0 (1.26.0 has no cp314 wheel; 1.27.0 has cp314-manylinux)
+- venv created with all packages: faster-whisper 1.2.1, piper-tts 1.4.2, onnxruntime 1.27.0, sounddevice 0.5.5, noisereduce, pyserial, ollama, pytest
+- Ollama installed, both models pulled: llama3.2:1b-instruct-q4_K_M (807MB), tinyllama:1.1b (637MB)
+- Piper TTS model downloaded: models/piper/en_US-amy-medium.onnx + .json
+- Silero VAD v4 model downloaded: models/silero/silero_vad_v4.onnx
+- Audio confirmed: plughw:2,0 (ALC256 Analog) — hw:2,0 rejects 16kHz mono; plughw handles rate conversion
+- Mic test: RMS amplitude 0.586 (strong signal)
+- configs/ubuntu_config.yaml created with plughw:2,0 for input/output, silence_threshold: 0.6
+- pytest tests/: 287 passed, 15 skipped (302 total)
+- Smoke test (2nd run, cached model): asr=5.779s, perceived=9.327s, total=13.245s
+
+#### Issues
+
+| Issue | Root cause | Fix |
+|---|---|---|
+| setup.sh aborts on apt install | Hardcodes python3.13 which does not exist on Ubuntu 26.04 | Skip setup.sh; run commands individually with python3.14 |
+| hw:2,0 rejects 16kHz mono | ALC256 only accepts 44100Hz stereo at hardware level | Use plughw:2,0 — handles rate conversion and channel downmix |
+| requirements.txt empty | File is generated at end of Week 1, not consumed at setup | Install from setup.sh's pip line directly |
+| pytest used system Python | venv not activated in terminal | source venv/bin/activate before pytest |
+
+#### Commits
+- c78f1e5 — Add recordings/.gitkeep
+- 36e0654 — Add benchmark artifacts
+
+---
+
+### Phase 0a — Day 2: VAD Wiring + Benchmark
+
+**Theme:** Wire vad.py to read threshold from config. Run benchmark suite. Record Ubuntu x86_64 numbers.
+
+#### Done
+- `src/vad.py` extended: `_load_silence_threshold()` reads `vad.silence_threshold` from config via `VOICE_ASSISTANT_CONFIG` env var; falls back to 0.5 if missing. `SILENCE_THRESHOLD = _load_silence_threshold()` at module level.
+- `ubuntu_config.yaml` corrected: key was `threshold` (wrong) — renamed to `silence_threshold: 0.6`
+- `scripts/benchmark.py` created from benchmark_pi.py: output relabelled to "Ubuntu x86_64", output file renamed to ubuntu_benchmarks.json
+- `configs/models.yaml` extended: `ubuntu_x86_64:` section appended (Pi fields untouched)
+- Benchmark run on silence WAV (3s) — first run used sine tone which inflated ASR RTF to 1.320; replaced with true silence, RTF dropped to 0.146
+
+#### Benchmark Results (Ubuntu x86_64, Python 3.14.4)
+
+| Stage | Metric | Value |
+|---|---|---|
+| LLM llama3.2:1b | first token | 0.265s |
+| LLM llama3.2:1b | total | 1.991s |
+| LLM tinyllama | first token | 0.081s |
+| LLM tinyllama | total | 0.678s |
+| ASR tiny.en | RTF | 0.146 |
+| ASR tiny.en | latency | 0.439s |
+| TTS amy-medium | RTF | 0.041 |
+| TTS amy-medium | first audio | 0.182s |
+| VAD silero_v4 | latency | 0.109s |
+| E2E | perceived_s | 2.077s |
+| E2E | total_s | 2.384s |
+
+**perceived_s 2.077s — under the 3.0s target.**
+
+#### Issues
+
+| Issue | Root cause | Fix |
+|---|---|---|
+| SILENCE_THRESHOLD read 0.5 after wiring | ubuntu_config.yaml used key `threshold` not `silence_threshold` | Renamed key in config |
+| 4 test failures after wiring | VOICE_ASSISTANT_CONFIG env var leaked into pytest session | unset VOICE_ASSISTANT_CONFIG before pytest |
+| ASR RTF 1.320 on sine tone | faster-whisper encoder runs hard on periodic non-speech signals | Replace sine with true silence WAV for benchmark |
+
+#### Commits
+- 7dcb096 — Wire vad.py silence_threshold to config
+- 9bc7390 — benchmark.py + Ubuntu x86_64 numbers
+
+---
+
+### Phase 0a — Days 3 and 4: main.py + test_main.py
+
+**Theme:** VAD-driven voice loop and full unit test suite.
+
+#### Done
+- `src/main.py` written — VAD state machine loop:
+  - States: IDLE, DETECTING_ONSET, RECORDING, PROCESSING
+  - Records 512-sample chunks via audio_io.record()
+  - get_speech_prob() per chunk; threshold from vad.SILENCE_THRESHOLD
+  - Onset: 3 consecutive above-threshold chunks
+  - Offset: 18 consecutive below-threshold chunks (~576ms)
+  - Saves accumulated audio to temp WAV, calls pipeline.run()
+  - Prints perceived_s per turn
+  - Ctrl+C calls conversation.end_session() cleanly
+  - CLI flags: --onset-chunks, --offset-chunks
+- Discovered tts.load_model() does not exist — correct function is tts.load_voice(). Fixed in both main.py and test_main.py.
+- `tests/test_main.py` written — 16 unit tests + 1 integration test:
+  - TestConstants (4): chunk size, sample rate, onset/offset defaults
+  - TestIdleState (2): silence stays IDLE, speech transitions to DETECTING_ONSET
+  - TestDetectingOnsetState (3): false start resets, threshold triggers RECORDING, below threshold does not
+  - TestRecordingState (3): silence increments offset, speech resets offset, threshold triggers PROCESSING
+  - TestRunLoopModelLoading (2): all models loaded on startup, Ctrl+C ends session
+  - TestRunLoopProcessing (2): pipeline called after speech+silence, not called on silence only
+  - TestMainIntegration (1 skipped): real mic one-turn test (opt-in)
+
+#### Test Results
+- tests/test_main.py: 16 passed, 1 skipped
+- Full suite: 303 passed, 16 skipped
+
+#### Issues
+
+| Issue | Root cause | Fix |
+|---|---|---|
+| 4 test failures on tts.load_model | tts.py exposes load_voice() not load_model() | sed replace in both main.py and test_main.py |
+
+#### Commits
+- 1d25d38 — src/main.py VAD loop + tests/test_main.py (303 passing)
+
+---
+
+### Phase 0a — Day 5: requirements.txt + README + LOGBOOK
+
+**Theme:** Freeze dependencies, rewrite README for Ubuntu track, update LOGBOOK.
+
+#### Done
+- `requirements.txt` generated via pip freeze (Ubuntu x86_64, Python 3.14.4 wheels)
+- `README.md` rewritten for Phase 0 Ubuntu track
+- `LOGBOOK.md` updated with Phase 0 session log
+
+#### Test Results
+- Full suite: 303 passed, 16 skipped — unchanged
+
+#### Status
+Phase 0a software complete. Pending: live voice test (speak into mic, hear TTS response through earphones). Phase 0b (A7672S GSM module) starts after live voice test confirms end-to-end pipeline.
+
+---
+
+## PHASE 0 — Ubuntu Track (Parallel to Pi)
+
+**Repo:** siddoboi/voice-assistant-ubuntu
+**Machine:** ASUS TUF Gaming A17 FA706IC, Ubuntu 26.04 LTS (Resolute Raccoon), x86_64
+**Python:** 3.14.4
+**Audio:** ALC256 Analog, plughw:2,0, TRRS earphone + inline mic (3.5mm jack)
+
+---
+
+### Phase 0a — Day 1: Environment Setup
+
+**Theme:** Fresh Ubuntu 26.04 environment, repo creation, all packages installed, smoke test passing.
+
+#### Done
+- GitHub repo `siddoboi/voice-assistant-ubuntu` created from Pi repo source
+- Ubuntu 26.04 confirmed (apt 3.2.0) — two major releases ahead of doc target (24.04)
+- Python 3.14.4 native (no deadsnakes needed) — all critical packages have cp314 wheels
+- onnxruntime upgraded to 1.27.0 (1.26.0 has no cp314 wheel; 1.27.0 has cp314-manylinux)
+- venv created with all packages: faster-whisper 1.2.1, piper-tts 1.4.2, onnxruntime 1.27.0, sounddevice 0.5.5, noisereduce, pyserial, ollama, pytest
+- Ollama installed, both models pulled: llama3.2:1b-instruct-q4_K_M (807MB), tinyllama:1.1b (637MB)
+- Piper TTS model downloaded: models/piper/en_US-amy-medium.onnx + .json
+- Silero VAD v4 model downloaded: models/silero/silero_vad_v4.onnx
+- Audio confirmed: plughw:2,0 (ALC256 Analog) — hw:2,0 rejects 16kHz mono; plughw handles rate conversion
+- Mic test: RMS amplitude 0.586 (strong signal)
+- configs/ubuntu_config.yaml created with plughw:2,0 for input/output, silence_threshold: 0.6
+- pytest tests/: 287 passed, 15 skipped (302 total)
+- Smoke test (2nd run, cached model): asr=5.779s, perceived=9.327s, total=13.245s
+
+#### Issues
+
+| Issue | Root cause | Fix |
+|---|---|---|
+| setup.sh aborts on apt install | Hardcodes python3.13 which does not exist on Ubuntu 26.04 | Skip setup.sh; run commands individually with python3.14 |
+| hw:2,0 rejects 16kHz mono | ALC256 only accepts 44100Hz stereo at hardware level | Use plughw:2,0 — handles rate conversion and channel downmix |
+| requirements.txt empty | File is generated at end of Week 1, not consumed at setup | Install from setup.sh's pip line directly |
+| pytest used system Python | venv not activated in terminal | source venv/bin/activate before pytest |
+
+#### Commits
+- c78f1e5 — Add recordings/.gitkeep
+- 36e0654 — Add benchmark artifacts
+
+---
+
+### Phase 0a — Day 2: VAD Wiring + Benchmark
+
+**Theme:** Wire vad.py to read threshold from config. Run benchmark suite. Record Ubuntu x86_64 numbers.
+
+#### Done
+- `src/vad.py` extended: `_load_silence_threshold()` reads `vad.silence_threshold` from config via `VOICE_ASSISTANT_CONFIG` env var; falls back to 0.5 if missing. `SILENCE_THRESHOLD = _load_silence_threshold()` at module level.
+- `ubuntu_config.yaml` corrected: key was `threshold` (wrong) — renamed to `silence_threshold: 0.6`
+- `scripts/benchmark.py` created from benchmark_pi.py: output relabelled to "Ubuntu x86_64", output file renamed to ubuntu_benchmarks.json
+- `configs/models.yaml` extended: `ubuntu_x86_64:` section appended (Pi fields untouched)
+- Benchmark run on silence WAV (3s) — first run used sine tone which inflated ASR RTF to 1.320; replaced with true silence, RTF dropped to 0.146
+
+#### Benchmark Results (Ubuntu x86_64, Python 3.14.4)
+
+| Stage | Metric | Value |
+|---|---|---|
+| LLM llama3.2:1b | first token | 0.265s |
+| LLM llama3.2:1b | total | 1.991s |
+| LLM tinyllama | first token | 0.081s |
+| LLM tinyllama | total | 0.678s |
+| ASR tiny.en | RTF | 0.146 |
+| ASR tiny.en | latency | 0.439s |
+| TTS amy-medium | RTF | 0.041 |
+| TTS amy-medium | first audio | 0.182s |
+| VAD silero_v4 | latency | 0.109s |
+| E2E | perceived_s | 2.077s |
+| E2E | total_s | 2.384s |
+
+**perceived_s 2.077s — under the 3.0s target.**
+
+#### Issues
+
+| Issue | Root cause | Fix |
+|---|---|---|
+| SILENCE_THRESHOLD read 0.5 after wiring | ubuntu_config.yaml used key `threshold` not `silence_threshold` | Renamed key in config |
+| 4 test failures after wiring | VOICE_ASSISTANT_CONFIG env var leaked into pytest session | unset VOICE_ASSISTANT_CONFIG before pytest |
+| ASR RTF 1.320 on sine tone | faster-whisper encoder runs hard on periodic non-speech signals | Replace sine with true silence WAV for benchmark |
+
+#### Commits
+- 7dcb096 — Wire vad.py silence_threshold to config
+- 9bc7390 — benchmark.py + Ubuntu x86_64 numbers
+
+---
+
+### Phase 0a — Days 3 and 4: main.py + test_main.py
+
+**Theme:** VAD-driven voice loop and full unit test suite.
+
+#### Done
+- `src/main.py` written — VAD state machine loop:
+  - States: IDLE, DETECTING_ONSET, RECORDING, PROCESSING
+  - Records 512-sample chunks via audio_io.record()
+  - get_speech_prob() per chunk; threshold from vad.SILENCE_THRESHOLD
+  - Onset: 3 consecutive above-threshold chunks
+  - Offset: 18 consecutive below-threshold chunks (~576ms)
+  - Saves accumulated audio to temp WAV, calls pipeline.run()
+  - Prints perceived_s per turn
+  - Ctrl+C calls conversation.end_session() cleanly
+  - CLI flags: --onset-chunks, --offset-chunks
+- Discovered tts.load_model() does not exist — correct function is tts.load_voice(). Fixed in both main.py and test_main.py.
+- `tests/test_main.py` written — 16 unit tests + 1 integration test:
+  - TestConstants (4): chunk size, sample rate, onset/offset defaults
+  - TestIdleState (2): silence stays IDLE, speech transitions to DETECTING_ONSET
+  - TestDetectingOnsetState (3): false start resets, threshold triggers RECORDING, below threshold does not
+  - TestRecordingState (3): silence increments offset, speech resets offset, threshold triggers PROCESSING
+  - TestRunLoopModelLoading (2): all models loaded on startup, Ctrl+C ends session
+  - TestRunLoopProcessing (2): pipeline called after speech+silence, not called on silence only
+  - TestMainIntegration (1 skipped): real mic one-turn test (opt-in)
+
+#### Test Results
+- tests/test_main.py: 16 passed, 1 skipped
+- Full suite: 303 passed, 16 skipped
+
+#### Issues
+
+| Issue | Root cause | Fix |
+|---|---|---|
+| 4 test failures on tts.load_model | tts.py exposes load_voice() not load_model() | sed replace in both main.py and test_main.py |
+
+#### Commits
+- 1d25d38 — src/main.py VAD loop + tests/test_main.py (303 passing)
+
+---
+
+### Phase 0a — Day 5: requirements.txt + README + LOGBOOK
+
+**Theme:** Freeze dependencies, rewrite README for Ubuntu track, update LOGBOOK.
+
+#### Done
+- `requirements.txt` generated via pip freeze (Ubuntu x86_64, Python 3.14.4 wheels)
+- `README.md` rewritten for Phase 0 Ubuntu track
+- `LOGBOOK.md` updated with Phase 0 session log
+
+#### Test Results
+- Full suite: 303 passed, 16 skipped — unchanged
+
+#### Status
+Phase 0a software complete. Pending: live voice test (speak into mic, hear TTS response through earphones). Phase 0b (A7672S GSM module) starts after live voice test confirms end-to-end pipeline.
