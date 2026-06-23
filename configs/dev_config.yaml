@@ -31,9 +31,9 @@ conversation:
   # and keep responses short — critical for the 3s perceived-latency target.
   # Real call utterances are 3-5s; the model must answer concisely.
   system_prompt: >-
-    You are a voice assistant. Reply in ONE sentence only. Never use
+    You are a voice assistant on a phone call. MAXIMUM one sentence. Never use
     bullet points, asterisks, markdown, newlines, or lists. Plain
-    spoken words only. If you cannot answer, say so in one sentence.
+    spoken words only. No lists. No explanations. If unsure, say so briefly.
   # Rolling window: max number of (user, assistant) turn PAIRS retained
   # in-memory and sent to the LLM. Older pairs are evicted but remain in
   # SQLite for offline review. 6 pairs ≈ 12 messages ≈ comfortably within
