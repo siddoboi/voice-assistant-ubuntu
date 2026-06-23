@@ -44,3 +44,33 @@ vad:
   chunk_size: 512
   silence_threshold: 0.5
   expected_latency_ms: 200
+
+# Ubuntu x86_64 benchmark numbers — recorded Phase 0a Day 2
+# Machine: ASUS TUF Gaming A17 FA706IC, Ubuntu 26.04, Python 3.14.4
+# Input: 3s silence WAV, Ollama running locally
+ubuntu_x86_64:
+  llm:
+    primary:
+      model: llama3.2:1b-instruct-q4_K_M
+      first_token_latency_s: 0.265
+      total_latency_s: 1.991
+    fallback:
+      model: tinyllama:1.1b
+      first_token_latency_s: 0.081
+      total_latency_s: 0.678
+  asr:
+    model: tiny.en
+    rtf: 0.146
+    latency_s: 0.439
+  tts:
+    model: en_US-amy-medium
+    rtf: 0.041
+    first_audio_s: 0.182
+  vad:
+    model: silero_vad_v4
+    latency_s: 0.109
+  e2e:
+    perceived_s: 2.077
+    asr_s: 0.435
+    first_audio_s: 1.641
+    total_s: 2.384
