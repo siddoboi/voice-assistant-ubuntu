@@ -10,7 +10,18 @@ import onnxruntime as ort
 MODEL_PATH = "models/silero/silero_vad_v4.onnx"
 SAMPLE_RATE = 16000
 CHUNK_SIZE = 512
-SILENCE_THRESHOLD = 0.5
+def _load_silence_threshold() -> float:
+    import os, yaml
+    config_path = os.environ.get('VOICE_ASSISTANT_CONFIG',
+                                 'configs/dev_config.yaml')
+    try:
+        with open(config_path) as f:
+            cfg = yaml.safe_load(f) or {}
+        return float(cfg.get('vad', {}).get('silence_threshold', 0.5))
+    except Exception:
+        return 0.5
+
+SILENCE_THRESHOLD = _load_silence_threshold()
 
 _session = None
 _h = None

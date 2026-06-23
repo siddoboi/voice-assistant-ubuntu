@@ -12,7 +12,7 @@ audio:
 
 vad:
   model_path: "models/silero/silero_vad_v4.onnx"
-  threshold: 0.5
+  silence_threshold: 0.6
   min_speech_duration_ms: 250
   min_silence_duration_ms: 500
 
