@@ -76,23 +76,16 @@ def _record_chunk() -> tuple[np.ndarray, np.ndarray]:
     chunk_native = audio_io.record(
         duration_sec=VAD_CHUNK_SIZE / SAMPLE_RATE,
     )
-
-    # Downmix stereo -> mono
-    if chunk_native.ndim == 2:
-        chunk_mono = chunk_native.mean(axis=1).astype(np.int16)
-    else:
-        chunk_mono = chunk_native
-
-    # Resample to exactly VAD_CHUNK_SIZE samples at 16kHz
-    if len(chunk_mono) != VAD_CHUNK_SIZE:
-        indices = np.linspace(0, len(chunk_mono) - 1, VAD_CHUNK_SIZE)
-        chunk_16k = np.interp(
-            indices,
-            np.arange(len(chunk_mono)),
-            chunk_mono.astype(np.float32)
-        ).astype(np.int16)
-    else:
-        chunk_16k = chunk_mono
+    # Squeeze mono channel axis if present
+    if chunk_native.ndim == 2 and chunk_native.shape[1] == 1:
+        chunk_native = chunk_native[:, 0]
+    # Resample 44100 -> 16kHz for VAD
+    indices = np.linspace(0, len(chunk_native) - 1, VAD_CHUNK_SIZE)
+    chunk_16k = np.interp(
+        indices,
+        np.arange(len(chunk_native)),
+        chunk_native.astype(np.float32)
+    ).astype(np.int16)
 
     return chunk_16k, chunk_native
 
@@ -166,39 +159,31 @@ def run_loop(
             # ---- processing ----
             if state == _State.PROCESSING:
                 print("[VAD] Silence detected - processing...")
-                # Use native-rate audio for ASR (better quality than resampled)
+                # Use native-rate mono audio for ASR
                 audio_native = np.concatenate(native_chunks)
-
-                # Downmix stereo -> mono
-                if audio_native.ndim == 2:
-                    audio_mono = audio_native.mean(axis=1).astype(np.int16)
-                else:
-                    audio_mono = audio_native
-
-                # Resample 44100 -> 16000 for ASR
-                n_out = int(len(audio_mono) * 16000 / 44100)
-                indices = np.linspace(0, len(audio_mono) - 1, n_out)
-                audio_16k = np.interp(
-                    indices,
-                    np.arange(len(audio_mono)),
-                    audio_mono.astype(np.float32)
-                ).astype(np.int16)
-
+                if audio_native.ndim == 2 and audio_native.shape[1] == 1:
+                    audio_native = audio_native[:, 0]
                 with tempfile.NamedTemporaryFile(
                     suffix=".wav", delete=False, dir="recordings"
                 ) as f:
                     tmp_path = f.name
-                audio_io.save_wav(audio_16k, tmp_path, sample_rate=16000)
+                audio_io.save_wav(audio_native, tmp_path, sample_rate=44100)
 
                 try:
+                    import subprocess
+                    subprocess.run(["amixer", "-c", "2", "set", "Capture", "nocap"], capture_output=True)
                     result = pipeline.run(
                         input_wav=tmp_path,
                         conversation=conversation,
                         skip_play=False,
                     )
                     perceived = result.get("latencies", {}).get("perceived_s")
-                    print(f"[LATENCY] perceived_s={perceived:.3f}s\n")
+                    print(f"[LATENCY] perceived_s={perceived:.3f}s")
+                    time.sleep(0.5)
+                    vad.reset_state()
                 finally:
+                    import subprocess as _sp
+                    _sp.run(["amixer", "-c", "2", "set", "Capture", "cap"], capture_output=True)
                     Path(tmp_path).unlink(missing_ok=True)
 
                 state         = _State.IDLE

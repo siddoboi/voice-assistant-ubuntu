@@ -6,7 +6,7 @@ audio:
   input_device: 5
   output_device: 7
   sample_rate: 44100
-  channels: 2
+  channels: 1
   chunk_size: 512
   record_seconds: 5
 
@@ -39,3 +39,10 @@ noise_reduction:
 
 logging:
   level: "INFO"
+
+# Mic gain tuned 2026-06-24
+# Default 100% causes saturation (RMS 30081, 22% clipping)
+# 28% gives RMS ~3460, no clipping, DC offset ~1062
+# Set via: amixer -c 2 set Capture 28%
+audio_gain:
+  capture_percent: 28
