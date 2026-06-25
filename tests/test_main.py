@@ -291,7 +291,9 @@ class TestRunLoopProcessing:
              patch("src.main.vad.get_speech_prob", side_effect=fake_prob), \
              patch("src.main.vad.SILENCE_THRESHOLD", 0.5), \
              patch("src.main.audio_io.save_wav"), \
-             patch("src.main.pipeline.run", return_value={"latencies": {"perceived_s": 1.5}}) as mock_pipeline, \
+             patch("src.main.asr.transcribe", return_value={"text": "what is the capital of france"}), \
+             patch("src.main._save_combined_wav"), \
+             patch("src.main.pipeline.run", return_value={"latencies": {"perceived_s": 1.5}, "transcript": "x", "reply_text": "Paris.", "reply_wav": ""}) as mock_pipeline, \
              patch("src.main.ConversationManager", return_value=mock_conv), \
              patch("pathlib.Path.unlink"):
             run_loop(onset_chunks=onset, offset_chunks=offset)

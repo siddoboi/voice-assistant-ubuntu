@@ -224,6 +224,7 @@ def run(
     conversation: Optional[ConversationManager] = None,
     session_id: Optional[str] = None,
     config_path: Optional[str] = None,
+    precomputed_transcript: Optional[str] = None,
 ) -> dict:
     """Run one streaming turn through the chain.
 
@@ -256,7 +257,10 @@ def run(
     input_path, rec_lat = _stage_record(duration_s, input_wav)
 
     # ---- 2. ASR ----
-    transcript, asr_lat = _stage_asr(input_path)
+    if precomputed_transcript is not None:
+        transcript, asr_lat = precomputed_transcript, 0.0
+    else:
+        transcript, asr_lat = _stage_asr(input_path)
 
     sample_rate = tts.output_sample_rate()
     max_chunks = _max_chunks(config_path)
