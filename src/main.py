@@ -29,7 +29,7 @@ import json
 import shutil
 import datetime
 import wave
-
+import sounddevice as sd
 import numpy as np
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -265,7 +265,7 @@ def run_loop(
                 else:
                     offset_count = 0
 
-            # ---- processing ----
+                # ---- processing ----
             if state == _State.PROCESSING:
                 print("[VAD] Silence detected - processing...")
                 # Use native-rate mono audio for ASR
@@ -381,7 +381,6 @@ def run_loop_ptt() -> None:
     turn_number = 0
     print(f"Session log: {session_dir}\n")
 
-    import sounddevice as sd
     cfg_rate = 44100
     cfg_device = audio_io._audio_cfg("input_device", 5) if hasattr(audio_io, "_audio_cfg") else 5
 
