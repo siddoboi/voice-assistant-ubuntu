@@ -1,193 +1,154 @@
-# Voice Assistant — Phase 0 (Ubuntu)
+# Voice Assistant — Ubuntu Edition (Phase 0)
 
-A fully offline, on-device conversational AI assistant running natively on
-Ubuntu Linux. Speak into your laptop mic and get a synthesized voice response
-through your earphones — no cloud, no internet at runtime, no Raspberry Pi
-needed.
+An offline, on-device conversational AI that answers phone calls — running natively on Ubuntu Linux with the GSM module connected over USB. The caller speaks, the system transcribes their speech, a local LLM generates a reply, and a local TTS engine speaks it back, **fully offline with no cloud or internet at runtime**.
 
-This is the **Phase 0 parallel track** of the voice assistant project.
-Phase 0a runs the full AI pipeline on laptop mic and earphones.
-Phase 0b wires in an A7672S GSM module to answer real cellular phone calls.
-The Pi track lives at [siddoboi/voice-assistant](https://github.com/siddoboi/voice-assistant).
+This is a parallel track to the [Raspberry Pi project](https://github.com/siddoboi/voice-assistant). It exists so the full pipeline can be built and tested on real audio hardware immediately, rather than waiting for the Pi. The Ubuntu machine is both development and deployment target.
 
-## Hardware Requirements
+> A software-based prototype is ready: Phase 0a (laptop mic and earphones, no GSM) is fully implemented — the streaming pipeline, push-to-talk mode, software audio normalization, and bad-transcript rejection all work end-to-end in a quiet room, backed by a passing test suite. Wiring in the A7672S GSM module over USB (Phase 0b) is the next step.
 
-**Phase 0a (now):**
-- Any Ubuntu x86_64 laptop
-- TRRS earphones with inline mic plugged into the 3.5mm jack
+---
 
-**Phase 0b (after Phase 0a is stable):**
-- A7672S GSM module (SIMCom A7672S-LASC, 4G LTE Cat-1)
-- 12V DC adapter
-- Nano SIM card (any Indian carrier)
-- Jumper wires to connect MIC/SPK pins to a USB audio adapter
+## The Two Sub-Phases
+
+| Phase | What it is | Hardware |
+|---|---|---|
+| **0a** | Full AI pipeline on laptop mic → earphones. No GSM. Proves the pipeline on real audio. | Laptop + TRRS earphones |
+| **0b** | Wire in the A7672S GSM module via USB. Replace mic/earphones with a real cellular call. | A7672S module + 12 V supply + nano SIM |
+
+Phase 0a is built first so that by the time the GSM module is added, every line of AI code is already tested with real voice — GSM integration becomes a one-day audio-source swap rather than debugging everything at once.
+
+---
+
+## Architecture
+
+```
+Your voice (mic / GSM call) → VAD (Silero) → ASR (faster-whisper small.en)
+   → LLM (Llama 3.2 3B via Ollama) → TTS (Piper) → earphones / GSM call
+```
+
+The pipeline streams sentence-by-sentence with a bounded `asyncio.Queue` for back-pressure, so the first words play before the full reply finishes generating.
+
+**Two input modes:**
+- **VAD mode** — continuous listening; Silero detects speech onset/offset automatically
+- **Push-to-talk (`--ptt`)** — records only between keypresses; structurally eliminates the mic re-hearing the assistant's own TTS reply
+
+---
+
+## What Makes the Ubuntu Track Different
+
+Building on real laptop audio surfaced problems the mocked test suite never could. The fixes here are production-minded and feed back to the Pi track:
+
+- **Software RMS normalization + noise gate** — input gain no longer needs hand-tuning; ASR becomes independent of input level. Critical for an unpredictable GSM line.
+- **Bad-transcript rejection** — empty or hallucinated input (Whisper emits "thank you" on silence) is caught and answered with a spoken "Sorry, I didn't catch that" instead of a wrong reply.
+- **Push-to-talk mode** — eliminates TTS-into-mic echo entirely.
+- **Indian-English tuning** — small.en ASR with an Indian-English prompt; 3B LLM for reliable one-sentence answers.
+- **Per-session logging** — JSON + text transcript + combined per-turn WAVs.
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|---|---|
+| LLM | Ollama — Llama 3.2 3B Instruct (Q4_K_M) primary, TinyLlama 1.1B fallback |
+| ASR | faster-whisper (small.en, int8, CPU) with Indian-English prompt |
+| TTS | Piper TTS (en_US-amy-medium) |
+| VAD | Silero VAD v4 via ONNX Runtime |
+| Telephony (Phase 0b) | A7672S 4G LTE module over USB, pyserial AT commands |
+| Audio I/O | sounddevice (PortAudio) + software RMS normalization |
+| Concurrency | asyncio (bounded-queue streaming) |
+| Persistence | SQLite |
+| Testing | pytest |
+| OS | Ubuntu (tested on 26.04, Python 3.14) |
+
+---
 
 ## Setup
+
+> **Note:** This repo was developed on Ubuntu 26.04 with Python 3.14.4. `setup.sh` hardcodes `python3.13`; on newer Ubuntu, run the steps individually with your Python version. `onnxruntime` must be ≥ 1.27.0 for Python 3.14 wheels.
 
 ```bash
 git clone https://github.com/siddoboi/voice-assistant-ubuntu.git
 cd voice-assistant-ubuntu
-python3.14 -m venv venv
-source venv/bin/activate
+python3 -m venv venv && source venv/bin/activate
 pip install --upgrade pip
-pip install faster-whisper==1.2.1 piper-tts==1.4.2 onnxruntime==1.27.0 \
-    sounddevice==0.5.5 psutil pyyaml==6.0.2 noisereduce pyserial ollama \
-    numpy pytest
+pip install faster-whisper piper-tts onnxruntime sounddevice pyyaml \
+            noisereduce pyserial ollama numpy pytest
 curl -fsSL https://ollama.com/install.sh | sh
-ollama serve &
-ollama pull llama3.2:1b-instruct-q4_K_M
+ollama pull llama3.2:3b-instruct-q4_K_M
 ollama pull tinyllama:1.1b
-mkdir -p models/piper models/silero
-wget -q https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx \
-    -O models/piper/en_US-amy-medium.onnx
-wget -q https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx.json \
-    -O models/piper/en_US-amy-medium.onnx.json
-wget -q https://github.com/snakers4/silero-vad/raw/v4.0/files/silero_vad.onnx \
-    -O models/silero/silero_vad_v4.onnx
+# download Piper voice + Silero VAD v4 into models/ (see setup.sh)
 ```
 
-Find your ALSA device indices and set them in `configs/ubuntu_config.yaml`:
+Find your audio device indices and set up the config:
 
 ```bash
-aplay -l
-arecord -l
+aplay -l && arecord -l          # note your mic + earphone card indices
+# edit configs/ubuntu_config.yaml — set integer input_device / output_device
+export VOICE_ASSISTANT_CONFIG=configs/ubuntu_config.yaml
 ```
+
+---
 
 ## Usage
 
-**Live voice interaction (Phase 0a):**
-
 ```bash
-export VOICE_ASSISTANT_CONFIG=configs/ubuntu_config.yaml
+# Push-to-talk mode (recommended — no echo issues)
+python src/main.py --ptt
+
+# VAD-driven continuous mode
 python src/main.py
+
+# Run the pipeline on a pre-recorded file
+python -m src.pipeline --input recordings/sample1.wav
 ```
 
-Speak into your mic. The assistant transcribes your speech, generates a reply
-via the local LLM, and plays it back through your earphones. Press Ctrl+C to stop.
+---
 
-**Pipeline smoke test (WAV file input):**
-
-```bash
-python -m src.pipeline --input recordings/sample1.wav --no-play
-```
-
-**Benchmark suite:**
+## Testing
 
 ```bash
-python scripts/benchmark.py --input recordings/sample1.wav
-```
-
-**VAD threshold tuning:**
-
-```bash
-python scripts/tune_vad_threshold.py recordings/sample1.wav
-```
-
-**Run tests:**
-
-```bash
-unset VOICE_ASSISTANT_CONFIG
+unset VOICE_ASSISTANT_CONFIG    # IMPORTANT — see note below
 pytest tests/
-pytest tests/ --run-integration  # requires real models + mic
 ```
+
+> **Caveat:** `vad.py` reads `VOICE_ASSISTANT_CONFIG` at import time. Leaving it exported makes VAD/audio tests read the wrong threshold and fail. Always `unset` it before `pytest`, re-export before running the assistant.
+
+The suite covers every module with fast mocked unit tests by default; real-model integration tests are opt-in via `--run-integration`.
+
+---
 
 ## Project Structure
+
+```
 voice-assistant-ubuntu/
-
 ├── src/
-
-│   ├── audio_io.py        # record/play/resample/WAV I/O + noise reduction
-
-│   ├── asr.py             # faster-whisper transcription
-
-│   ├── llm_client.py      # Ollama LLM client + sentence streaming
-
-│   ├── tts.py             # Piper TTS batch + streaming synthesis
-
-│   ├── vad.py             # Silero VAD v4 + config-driven threshold
-
-│   ├── conversation.py    # multi-turn history + SQLite session persistence
-
-│   ├── pipeline.py        # streaming ASR-LLM-TTS-play orchestration
-
-│   ├── main.py            # VAD-driven voice loop (Phase 0a)
-
-│   └── telephony/
-
-│       └── gsm_adapter.py # A7672S AT-command call control (Phase 0b)
-
+│   ├── main.py            # VAD state machine + push-to-talk loop + normalization + logging
+│   ├── pipeline.py        # streaming pipeline + precomputed_transcript bypass + markdown stripping
+│   ├── asr.py             # faster-whisper (config model_size + Indian-English prompt)
+│   ├── vad.py             # Silero VAD v4 (config-driven silence_threshold)
+│   ├── tts.py / llm_client.py / audio_io.py / conversation.py
+│   └── telephony/gsm_adapter.py   # A7672S AT-command control (Phase 0b)
 ├── configs/
+│   ├── ubuntu_config.yaml # Phase 0a live config
+│   ├── dev_config.yaml / pi_config.yaml / models.yaml
+├── scripts/               # benchmark + VAD tuning
+├── tests/                 # pytest suite (303 passing)
+└── recordings/sessions/   # per-session logs (local only)
+```
 
-│   ├── ubuntu_config.yaml # Ubuntu deployment settings (fill ALSA indices)
+---
 
-│   ├── dev_config.yaml    # WSL2 reference config
+## Roadmap
 
-│   └── models.yaml        # model choices + benchmark metrics
+- **Phase 0a (done):** Full pipeline on laptop audio, live-voice fixes, push-to-talk, normalization, bad-transcript gate
+- **Phase 0b:** Solder A7672S headers, wire audio, GSM call lifecycle in `main.py`, first real call
+- **Later:** WER evaluation, systemd service, error hardening
 
-├── scripts/
+A GPU-accelerated multilingual variant is being developed in [voice-assistant-multilingual](https://github.com/siddoboi/voice-assistant-multilingual).
 
-│   ├── benchmark.py       # full LLM/ASR/TTS/VAD/E2E benchmark suite
+---
 
-│   └── tune_vad_threshold.py
+## License
 
-├── tests/                 # 303 pytest unit + opt-in integration tests
-
-├── models/                # gitignored - download fresh on each machine
-
-├── recordings/            # gitignored - WAV samples + SQLite DB
-
-└── setup.sh
-## Benchmark Numbers (Ubuntu x86_64, Phase 0a Day 2)
-
-Machine: ASUS TUF Gaming A17 FA706IC, Ubuntu 26.04, Python 3.14.4
-
-| Stage | Metric | Value |
-|-------|--------|-------|
-| LLM (llama3.2:1b) | first token | 0.265s |
-| LLM (llama3.2:1b) | total | 1.991s |
-| LLM (tinyllama) | first token | 0.081s |
-| ASR (tiny.en) | RTF | 0.146 |
-| TTS (amy-medium) | RTF | 0.041 |
-| TTS (amy-medium) | first audio | 0.182s |
-| End-to-end | perceived_s | 2.077s |
-
-Target: perceived_s <= 3.0s. Current: 2.077s.
-
-## Architecture
-
-The pipeline overlaps LLM generation with TTS synthesis and audio playback to
-minimize perceived latency. Transcribed speech goes to the local LLM, whose
-token stream is buffered into sentences as they form. Each sentence is
-synthesized immediately and pushed onto a bounded `asyncio.Queue`. A consumer
-task plays audio off the queue while synthesis continues. Perceived latency is
-ASR time plus time-to-first-audio.
-
-The VAD loop in `main.py` runs a state machine on 512-sample chunks: IDLE,
-DETECTING_ONSET, RECORDING, PROCESSING. Speech onset requires 3 consecutive
-above-threshold chunks. Offset requires 18 consecutive below-threshold chunks
-(~576ms silence) to end capture and trigger the pipeline.
-
-## Tech Stack
-
-- **OS:** Ubuntu 26.04 LTS (Resolute Raccoon), x86_64
-- **Python:** 3.14.4
-- **LLM:** Ollama - Llama 3.2 1B Instruct (Q4_K_M) primary, TinyLlama 1.1B fallback
-- **ASR:** faster-whisper 1.2.1 (tiny.en, int8, CPU)
-- **TTS:** Piper TTS 1.4.2 (en_US-amy-medium)
-- **VAD:** Silero VAD v4 via ONNX Runtime 1.27.0
-- **Noise reduction:** noisereduce (lazy-imported, enabled from Day 1)
-- **Audio I/O:** sounddevice 0.5.5 (PortAudio, plughw:2,0 on this machine)
-- **Concurrency:** asyncio (bounded-queue streaming)
-- **Config:** PyYAML
-- **Persistence:** SQLite (stdlib)
-- **Testing:** pytest (303 tests: 287 unit + 16 main + 15 opt-in integration + 1 integration)
-- **Telephony (Phase 0b):** A7672S via pyserial AT commands
-
-## Current Status
-
-**Phase 0a complete.** Full AI pipeline working on laptop mic and earphones.
-VAD-driven `main.py` loop written and tested. 303 tests passing.
-Perceived latency 2.077s (target <= 3.0s).
-
-**Next:** Live voice interaction test (speak into mic, hear TTS response).
-Then Phase 0b: wire in A7672S GSM module for real cellular calls.
+MIT
