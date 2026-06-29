@@ -1135,3 +1135,49 @@ Multi-turn reasoning worked: LLM did not know TWS, user gave hint, LLM correctly
 #### Phase 0a Status: COMPLETE
 All software tasks done. Live voice pipeline confirmed working end-to-end.
 Pending before Phase 0b: none.
+
+---
+
+### Phase 0a — Live Hardening Session (post Day 5)
+
+**Theme:** Make the live pipeline actually usable. Audio device routing, mic gain, echo, hallucination handling, push-to-talk, normalization, session logging.
+
+#### Audio device routing (sounddevice vs ALSA)
+- sounddevice does NOT accept ALSA strings (plughw:2,0). Requires integer PortAudio indices.
+- input_device 5 (ALC256 hw:2,0), output_device 7 (PipeWire). PipeWire virtual sources (13, ec_mic 15) hang sd.rec() and were avoided.
+- Pipeline records at device-native 44100Hz mono, resamples to 16kHz for VAD/ASR in software.
+
+#### Mic gain / saturation
+- Default capture 100% / +30dB caused clipping: Max 32767, RMS 30081, 22.2% clipped, DC -12757.
+- Tuned to ~28-29% (RMS ~3460, no clipping). Saved with `sudo alsactl store`.
+- PipeWire vs ALSA gain conflict: PipeWire overrides ALSA gain on stream open and reassigns object IDs. Stable handle is @DEFAULT_AUDIO_SOURCE@. Headset Mic Boost / Internal Mic Boost zeroed.
+
+#### "Thank you" hallucination
+- Root cause = Whisper-on-silence + muted-mic zeros (3 layers muted from echo-cancel experiments) + TTS echo into TRRS inline mic.
+- amixer/pactl/wpctl mute-during-playback all FAILED (sounddevice holds the ALSA stream open; also muted speakers twice). Hack removed.
+- PipeWire module-echo-cancel (webrtc) loaded ec_mic but hung sounddevice. Abandoned and unloaded.
+
+#### What actually fixed it
+- Software RMS normalization + noise gate in main.py (_normalize_audio, target_rms 3000, noise_gate 150, gain cap 20x). Makes ASR independent of input level; gate kills silence-hallucination path.
+- Bad-transcript rejection: asr.transcribe() runs first; _is_bad_transcript() catches empty/short/known-hallucination phrases; speaks "Sorry, I didn't catch that" instead of sending to LLM. pipeline.run() gained precomputed_transcript param to avoid double ASR.
+- Push-to-talk mode (--ptt / run_loop_ptt): records only between two Enter presses, so the mic never hears the TTS reply. Eliminates echo structurally.
+
+#### Model changes
+- ASR tiny.en -> small.en (config-driven via asr.model_size). Indian-English initial_prompt added.
+- LLM 1b -> llama3.2:3b-instruct-q4_K_M. System prompt tightened to one sentence. Markdown stripping added in pipeline (_clean_sentence).
+
+#### Session logging
+- recordings/sessions/session_<id>/ holds session_<id>.json, session_<id>.txt, and turn_NN.wav (input + 0.5s silence + reply, 16k mono). Rewritten after every turn. Local-only (gitignored).
+
+#### Live test result
+- PTT mode tested: silence -> "Sorry, I didn't catch that"; real questions answered correctly in one sentence; no "thank you" echo. Quiet room with close-talk mic gives clean VAD separation (silence max prob ~0.25).
+- 303 passed / 16 skipped maintained throughout.
+
+#### Known environmental issue (NOT a code defect)
+- Earphones plugged in before wake-from-sleep or power-on are not detected by the OS; replug fixes it. This is an Ubuntu/PipeWire jack re-detection quirk, unrelated to the assistant code. Becomes irrelevant in Phase 0b when the A7672S GSM module replaces the 3.5mm jack.
+
+#### Commits
+- 1d243c1, c2da954, e2854bf, f61dffd, bbed9c3, b93399d, ca00214
+
+#### Status
+Phase 0a live-validated via push-to-talk. Software complete. Next: optional gain-on-startup step, then multilingual GPU repo (large-v3 on RTX 3050), then Phase 0b hardware.
