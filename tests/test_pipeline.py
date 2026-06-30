@@ -181,23 +181,49 @@ class TestPlayback:
         mocked_stages.play.assert_not_called()
 
     def test_plays_one_chunk_per_sentence(self, mocked_stages, input_wav: Path, tmp_path: Path):
-        pipeline.run(input_wav=str(input_wav), output_wav=str(tmp_path / "out.wav"), skip_play=False)
-        # Two sentences -> two PCM chunks -> two play calls.
-        assert mocked_stages.play.call_count == 2
+        # Continuous-stream playback: assert the player received the chunks
+        # via append(), instead of counting old per-chunk audio_io.play() calls.
+        appended = []
+        fake_player = MagicMock()
+        fake_player.append.side_effect = lambda pcm: appended.append(pcm)
+        fake_player.finish_and_wait = MagicMock()
+        fake_player.was_interrupted = False
+        fake_player.samples_played = 0
+        with patch.object(pipeline, "_ContinuousPlayer", return_value=fake_player):
+            pipeline.run(input_wav=str(input_wav), output_wav=str(tmp_path / "out.wav"), skip_play=False)
+        # Two sentences -> two PCM chunks appended to the continuous player.
+        assert len(appended) == 2
 
     def test_play_uses_voice_sample_rate(self, mocked_stages, input_wav: Path, tmp_path: Path):
-        pipeline.run(input_wav=str(input_wav), output_wav=str(tmp_path / "out.wav"), skip_play=False)
-        assert mocked_stages.play.call_args.kwargs.get("sample_rate") == 22050
+        created_with = {}
+        def fake_player_ctor(sample_rate, interrupt_event=None):
+            created_with["sample_rate"] = sample_rate
+            fp = MagicMock()
+            fp.finish_and_wait = MagicMock()
+            fp.was_interrupted = False
+            fp.samples_played = 0
+            return fp
+        with patch.object(pipeline, "_ContinuousPlayer", side_effect=fake_player_ctor):
+            pipeline.run(input_wav=str(input_wav), output_wav=str(tmp_path / "out.wav"), skip_play=False)
+        assert created_with.get("sample_rate") == 22050
 
     def test_all_chunks_played_under_small_buffer(self, mocked_stages, input_wav: Path, tmp_path: Path):
-        # Many sentences with a buffer of 1 → exercises back-pressure; all must play.
+        # Many sentences with a buffer of 1 → exercises back-pressure; all must
+        # reach the continuous player.
         def many(messages, model=None):
             for i in range(10):
                 yield f"Sentence {i}."
         mocked_stages.llm.side_effect = many
-        with patch.object(pipeline, "_max_chunks", lambda config_path=None: 1):
+        appended = []
+        fake_player = MagicMock()
+        fake_player.append.side_effect = lambda pcm: appended.append(pcm)
+        fake_player.finish_and_wait = MagicMock()
+        fake_player.was_interrupted = False
+        fake_player.samples_played = 0
+        with patch.object(pipeline, "_max_chunks", lambda config_path=None: 1), \
+             patch.object(pipeline, "_ContinuousPlayer", return_value=fake_player):
             result = pipeline.run(input_wav=str(input_wav), output_wav=str(tmp_path / "out.wav"), skip_play=False)
-        assert mocked_stages.play.call_count == 10
+        assert len(appended) == 10
         assert result["num_audio_chunks"] == 10
 
     def test_reply_wav_written(self, mocked_stages, input_wav: Path, tmp_path: Path):
@@ -297,7 +323,7 @@ class TestReturnValue:
         result = pipeline.run(input_wav=str(input_wav), output_wav=str(tmp_path / "out.wav"), skip_play=True)
         assert set(result.keys()) == {
             "input_path", "transcript", "reply_text", "reply_wav",
-            "session_id", "num_sentences", "num_audio_chunks", "latencies",
+            "session_id", "num_sentences", "num_audio_chunks", "interrupted", "latencies",
         }
         assert set(result["latencies"].keys()) == {
             "record_s", "asr_s", "first_audio_s", "stream_s", "perceived_s", "total_s",

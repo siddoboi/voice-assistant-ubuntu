@@ -144,10 +144,6 @@ def _safe_next(gen, stats_holder: dict):
         return _SENTINEL
 
 
-def _play_chunk(chunk, sample_rate: int) -> None:
-    audio_io.play(chunk, sample_rate=sample_rate)
-
-
 async def _produce(queue, sentence_iter, sample_rate, tts_stats) -> None:
     """Synthesise PCM per sentence (off-thread) and feed the bounded queue.
 
@@ -169,44 +165,132 @@ async def _produce(queue, sentence_iter, sample_rate, tts_stats) -> None:
         await queue.put(_SENTINEL)
 
 
-async def _consume(queue, sample_rate, skip_play, t0, result) -> None:
-    """Drain the queue, playing each chunk (off-thread) and timing first audio."""
+class _ContinuousPlayer:
+    """Plays int16 mono PCM through one continuous sd.OutputStream.
+
+    Audio is fed via append(); the stream's callback drains a flat buffer
+    on its own thread, so there are no gaps between chunks (no stutter).
+    interrupt_event is checked inside the callback for near-instant,
+    glitch-free stopping. samples_played tracks exactly how much audio was
+    actually heard, for accurate interrupted-reply logging.
+    """
+
+    def __init__(self, sample_rate: int, interrupt_event=None):
+        import sounddevice as sd
+        import threading
+
+        self._sd = sd
+        self._sample_rate = sample_rate
+        self._interrupt_event = interrupt_event
+        self._buf = np.zeros(0, dtype=np.int16)
+        self._lock = threading.Lock()
+        self._finished = threading.Event()
+        self._no_more_data = False
+        self.samples_played = 0
+        self.was_interrupted = False
+
+        self._stream = sd.OutputStream(
+            samplerate=sample_rate, channels=1, dtype="int16",
+            callback=self._callback, blocksize=1024,
+        )
+        self._stream.start()
+
+    def _callback(self, outdata, frames, time_info, status) -> None:
+        if self._interrupt_event is not None and self._interrupt_event.is_set():
+            self.was_interrupted = True
+            outdata[:] = 0
+            self._finished.set()
+            raise self._sd.CallbackStop()
+
+        with self._lock:
+            n = min(frames, len(self._buf))
+            if n > 0:
+                outdata[:n, 0] = self._buf[:n]
+                self._buf = self._buf[n:]
+            if n < frames:
+                outdata[n:, 0] = 0
+            self.samples_played += n
+            buf_empty = len(self._buf) == 0
+
+        if buf_empty and self._no_more_data:
+            self._finished.set()
+            raise self._sd.CallbackStop()
+
+    def append(self, pcm: np.ndarray) -> None:
+        with self._lock:
+            self._buf = np.concatenate([self._buf, pcm])
+
+    def finish_and_wait(self, poll_interval: float = 0.02) -> None:
+        """Mark no more data coming, then block until playback drains/stops."""
+        self._no_more_data = True
+        while not self._finished.is_set():
+            if self._interrupt_event is not None and self._interrupt_event.is_set():
+                break
+            self._finished.wait(poll_interval)
+        try:
+            self._stream.stop()
+            self._stream.close()
+        except Exception:
+            pass
+
+
+async def _consume(queue, sample_rate, skip_play, t0, result, interrupt_event=None) -> None:
+    """Drain the queue, feeding a continuous playback stream and timing
+    first audio. If interrupt_event fires, the stream stops glitch-free
+    mid-buffer and result['interrupted'] / ['samples_played'] are set.
+    """
     loop = asyncio.get_event_loop()
     chunks: list = []
+    player = None
+    if not skip_play:
+        player = await loop.run_in_executor(
+            None, _ContinuousPlayer, sample_rate, interrupt_event
+        )
+
     while True:
         chunk = await queue.get()
         if chunk is _SENTINEL:
             queue.task_done()
             break
+        if interrupt_event is not None and interrupt_event.is_set():
+            result["interrupted"] = True
+            queue.task_done()
+            continue
         if result["first_audio_s"] is None:
             result["first_audio_s"] = time.perf_counter() - t0
         chunks.append(chunk)
-        if not skip_play:
-            await loop.run_in_executor(None, _play_chunk, chunk, sample_rate)
+        if player is not None:
+            player.append(chunk)
         queue.task_done()
+
+    if player is not None:
+        await loop.run_in_executor(None, player.finish_and_wait)
+        if player.was_interrupted:
+            result["interrupted"] = True
+        result["samples_played"] = player.samples_played
     result["chunks"] = chunks
 
 
-async def _stream_and_play_async(sentence_iter, sample_rate, max_chunks, skip_play, t0):
+async def _stream_and_play_async(sentence_iter, sample_rate, max_chunks, skip_play, t0, interrupt_event=None):
     queue: asyncio.Queue = asyncio.Queue(maxsize=max_chunks)
     tts_stats: dict = {}
-    result = {"first_audio_s": None, "chunks": []}
+    result = {"first_audio_s": None, "chunks": [], "interrupted": False}
     producer = asyncio.create_task(
         _produce(queue, sentence_iter, sample_rate, tts_stats)
     )
-    await _consume(queue, sample_rate, skip_play, t0, result)
+    await _consume(queue, sample_rate, skip_play, t0, result, interrupt_event)
     await producer
-    return result["chunks"], result["first_audio_s"], tts_stats.get("stats", {})
+    return result["chunks"], result["first_audio_s"], tts_stats.get("stats", {}), result["interrupted"]
 
 
-def _stream_and_play(sentence_iter, sample_rate, max_chunks, skip_play):
+def _stream_and_play(sentence_iter, sample_rate, max_chunks, skip_play, interrupt_event=None):
     """Sync wrapper: run the producer/consumer event loop to completion.
 
-    Returns (chunks, first_audio_s, tts_stats).
+    Returns (chunks, first_audio_s, tts_stats, interrupted).
     """
     t0 = time.perf_counter()
     return asyncio.run(
-        _stream_and_play_async(sentence_iter, sample_rate, max_chunks, skip_play, t0)
+        _stream_and_play_async(sentence_iter, sample_rate, max_chunks, skip_play, t0, interrupt_event)
     )
 
 
@@ -225,6 +309,7 @@ def run(
     session_id: Optional[str] = None,
     config_path: Optional[str] = None,
     precomputed_transcript: Optional[str] = None,
+    interrupt_event=None,
 ) -> dict:
     """Run one streaming turn through the chain.
 
@@ -282,15 +367,16 @@ def run(
             sentence_iter = llm_client.stream_sentences_from_messages(messages)
         else:
             sentence_iter = llm_client.stream_sentences_from_messages(messages, model=llm_model)
-        chunks, first_audio_s, _ = _stream_and_play(
-            _recording_iter(sentence_iter, collected), sample_rate, max_chunks, skip_play
+        chunks, first_audio_s, _, interrupted = _stream_and_play(
+            _recording_iter(sentence_iter, collected), sample_rate, max_chunks, skip_play,
+            interrupt_event
         )
         reply_text = " ".join(collected).strip()
 
         # Empty reply → speak a fallback so the caller always hears something.
         if not reply_text:
             reply_text = FALLBACK_REPLY
-            fb_chunks, fb_first, _ = _stream_and_play(
+            fb_chunks, fb_first, _, _ = _stream_and_play(
                 iter([reply_text]), sample_rate, max_chunks, skip_play
             )
             chunks = fb_chunks
@@ -332,6 +418,7 @@ def run(
         "session_id": session_id_out,
         "num_sentences": len(collected),
         "num_audio_chunks": len(chunks),
+        "interrupted": interrupted,
         "latencies": {
             "record_s": rec_lat,
             "asr_s": asr_lat,
