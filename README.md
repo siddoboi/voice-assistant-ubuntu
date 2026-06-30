@@ -4,7 +4,7 @@ An offline, on-device conversational AI that listens, understands, and replies -
 
 This is a parallel track to the [Raspberry Pi project](https://github.com/siddoboi/voice-assistant), built to develop and validate the full conversational pipeline on real audio hardware without waiting on Pi/GSM hardware. The Ubuntu machine is both development and deployment target.
 
-> A software-based prototype is ready and complete: the full streaming pipeline, push-to-talk mode, software audio normalization, and bad-transcript rejection all work end-to-end in a quiet room, backed by a passing test suite.
+> A software-based prototype is ready and complete: the full streaming pipeline, push-to-talk mode with barge-in, software audio normalization, and bad-transcript rejection all work end-to-end in a quiet room, backed by a passing test suite.
 
 ---
 
@@ -30,6 +30,7 @@ Building on real laptop audio surfaced problems a mocked test suite never could.
 - **Software RMS normalization + noise gate** - input gain no longer needs hand-tuning; ASR becomes independent of input level.
 - **Bad-transcript rejection** - empty or hallucinated input (Whisper emits "thank you" on silence) is caught and answered with a spoken "Sorry, I didn't catch that" instead of a wrong reply.
 - **Push-to-talk mode** - eliminates TTS-into-mic echo entirely.
+- **Push-to-talk with barge-in** - press Enter to interrupt the assistant mid-reply; playback stops instantly via continuous interruptible audio, and it immediately starts listening for your next question.
 - **Indian-English tuning** - small.en ASR with an Indian-English prompt; 3B LLM for reliable one-sentence answers.
 - **Per-session logging** - JSON + text transcript + combined per-turn WAVs.
 
@@ -44,7 +45,7 @@ Building on real laptop audio surfaced problems a mocked test suite never could.
 | TTS | Piper TTS (en_US-amy-medium) |
 | VAD | Silero VAD v4 via ONNX Runtime |
 | Audio I/O | sounddevice (PortAudio) + software RMS normalization |
-| Concurrency | asyncio (bounded-queue streaming) |
+| Concurrency | asyncio (bounded-queue streaming, continuous interruptible playback) |
 | Persistence | SQLite |
 | Testing | pytest |
 | OS | Ubuntu (tested on 26.04, Python 3.14) |
@@ -53,13 +54,15 @@ Building on real laptop audio surfaced problems a mocked test suite never could.
 
 ## Setup
 
-> **Note:** This repo was developed on Ubuntu 26.04 with Python 3.14.4. `setup.sh` hardcodes `python3.13`; on newer Ubuntu, run the steps individually with your Python version. `onnxruntime` must be ≥ 1.27.0 for Python 3.14 wheels.
+> **Note:** This repo was developed on Ubuntu 26.04 with Python 3.14.4. `setup_pi.sh` is the legacy script for the Raspberry Pi target (hardcodes `python3.13`) - do not use it here. For Ubuntu, use `setup_ubuntu.sh` below, which handles Python 3.14 and the correct package pins automatically. `onnxruntime` must be ≥ 1.27.0 for Python 3.14 wheels.
 
 ```bash
 git clone https://github.com/siddoboi/voice-assistant-ubuntu.git
 cd voice-assistant-ubuntu
 bash setup_ubuntu.sh
 ```
+
+`setup_ubuntu.sh` installs system packages, builds the venv, installs all pinned Python packages, installs Ollama and pulls both models, downloads the Piper/Silero models, pre-fetches the faster-whisper weights, and runs the test suite. It cannot fully automate audio device selection or mic gain, since those are physically different per machine - it prints your detected devices and sets a starting gain, but you must verify the config manually (next step).
 
 Find your audio device indices and set up the config:
 
@@ -84,6 +87,8 @@ python src/main.py
 python -m src.pipeline --input recordings/sample1.wav
 ```
 
+While the assistant is replying in push-to-talk mode, press Enter again to interrupt and speak immediately - no waiting for the reply to finish.
+
 ---
 
 ## Testing
@@ -104,27 +109,29 @@ The suite covers every module with fast mocked unit tests by default; real-model
 ```
 voice-assistant-ubuntu/
 ├── src/
-│   ├── main.py            # VAD state machine + push-to-talk loop + normalization + logging
-│   ├── pipeline.py        # streaming pipeline + precomputed_transcript bypass + markdown stripping
+│   ├── main.py            # VAD state machine + push-to-talk loop + barge-in + normalization + logging
+│   ├── pipeline.py        # streaming pipeline + interruptible playback + precomputed_transcript bypass + markdown stripping
 │   ├── asr.py             # faster-whisper (config model_size + Indian-English prompt)
-│   ├── vad.py             # Silero VAD v4 (config-driven silence_threshold)
+│   ├── vad.py              # Silero VAD v4 (config-driven silence_threshold)
 │   └── tts.py / llm_client.py / audio_io.py / conversation.py
 ├── configs/
 │   ├── ubuntu_config.yaml # live config
-│   ├── dev_config.yaml / models.yaml
-├── scripts/               # benchmark + VAD tuning
-├── tests/                 # pytest suite
-└── recordings/sessions/   # per-session logs (local only)
+│   └── dev_config.yaml / models.yaml
+├── scripts/                # benchmark + VAD tuning
+├── tests/                  # pytest suite
+├── setup_ubuntu.sh         # automated Ubuntu/Phase 0a setup
+├── setup_pi.sh             # legacy Raspberry Pi setup (not for this repo's target)
+└── recordings/sessions/    # per-session logs (local only)
 ```
 
 ---
 
 ## Roadmap
 
-- **Core pipeline (done):** Full conversational pipeline on laptop audio, live-voice fixes, push-to-talk, normalization, bad-transcript gate
+- **Core pipeline (done):** Full conversational pipeline on laptop audio, live-voice fixes, push-to-talk, barge-in, normalization, bad-transcript gate
 - **Later:** WER evaluation, broader hardening, expanded testing
 
-A GPU-accelerated multilingual variant is being developed in [voice-assistant-multilingual](https://github.com/siddoboi/voice-assistant-multilingual). Real-call telephony integration is being pursued separately in the [Raspberry Pi project](https://github.com/siddoboi/voice-assistant).
+A GPU-accelerated multilingual variant is planned in [voice-assistant-multilingual](https://github.com/siddoboi/voice-assistant-multilingual). Real-call telephony integration is being pursued separately in the [Raspberry Pi project](https://github.com/siddoboi/voice-assistant).
 
 ---
 
