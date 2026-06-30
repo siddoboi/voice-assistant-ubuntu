@@ -58,14 +58,7 @@ Building on real laptop audio surfaced problems a mocked test suite never could.
 ```bash
 git clone https://github.com/siddoboi/voice-assistant-ubuntu.git
 cd voice-assistant-ubuntu
-python3 -m venv venv && source venv/bin/activate
-pip install --upgrade pip
-pip install faster-whisper piper-tts onnxruntime sounddevice pyyaml \
-            noisereduce ollama numpy pytest
-curl -fsSL https://ollama.com/install.sh | sh
-ollama pull llama3.2:3b-instruct-q4_K_M
-ollama pull tinyllama:1.1b
-# download Piper voice + Silero VAD v4 into models/ (see setup.sh)
+bash setup_ubuntu.sh
 ```
 
 Find your audio device indices and set up the config:
